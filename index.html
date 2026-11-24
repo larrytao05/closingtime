@@ -1,0 +1,64 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="theme-color" content="#171b20" />
+    <title>Closing Time</title>
+  </head>
+  <body>
+    <main class="shell">
+      <header class="page-header">
+        <div>
+          <h1>Closing Time</h1>
+          <p>Help Mara keep the café’s closing papers dry.</p>
+        </div>
+        <button id="reset" class="quiet" type="button">Restart scene</button>
+      </header>
+      <div class="game-layout">
+        <section class="room-panel" aria-label="Café room">
+          <div id="room"></div>
+          <div class="room-footer">
+            <p><span class="legend you"></span>You <span class="legend mara"></span>Mara</p>
+            <p>Move with arrow keys, WASD, or tap an adjacent tile.</p>
+            <span id="turn">Turn 0</span>
+          </div>
+        </section>
+        <aside class="sidebar" aria-label="Game controls">
+          <section class="panel">
+            <h2>Café state</h2>
+            <dl class="status">
+              <dt>Window</dt><dd id="window"></dd>
+              <dt>Papers</dt><dd id="papers"></dd>
+              <dt>Your hands</dt><dd id="hands"></dd>
+            </dl>
+          </section>
+          <section class="panel">
+            <h2>Actions</h2>
+            <div id="actions" class="action-list"></div>
+            <form id="speak">
+              <label for="say">Say something to Mara</label>
+              <div class="input-row">
+                <input id="say" type="text" maxlength="160" autocomplete="off" placeholder="I’ll get the window." />
+                <button id="say-button" type="submit" class="quiet">Say</button>
+              </div>
+            </form>
+            <p id="feedback" class="feedback" role="status"></p>
+          </section>
+          <section class="panel" aria-label="Mara and recent activity">
+            <h2>Mara</h2>
+            <p id="intent" class="intent" role="status"></p>
+            <details>
+              <summary>Turn audit</summary>
+              <p id="rationale"></p>
+              <button id="export-traces" type="button" class="quiet">Export turn traces</button>
+              <p id="trace-status" role="status"></p>
+            </details>
+            <ol id="history" class="history" aria-label="Recent activity"></ol>
+          </section>
+        </aside>
+      </div>
+    </main>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>
