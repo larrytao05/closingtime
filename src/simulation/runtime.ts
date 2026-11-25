@@ -91,6 +91,7 @@ export class SimulationRuntime {
   private scheduler!: SimulationScheduler;
   private generation = freshGeneration();
   private paused = false;
+  private resetting = false;
   private disposed = false;
   private lastFrameAt = 0;
   private lastAmbientAt = 0;
@@ -171,24 +172,25 @@ export class SimulationRuntime {
   }
 
   action(actorId: SimulationActorId, action: SimulationAction, reply?: string): SimulationDispatchOutcome {
-    if (this.disposed) return { status: 'skipped', reason: 'paused' };
+    if (this.disposed || this.resetting) return { status: 'skipped', reason: 'paused' };
     const outcome = this.room.dispatch(actorId, clone(action), reply);
     this.publish();
     return outcome;
   }
 
   wake(actorId: NpcId, reason = 'external input'): void {
-    if (!this.paused && !this.disposed) this.scheduler.wake(actorId, reason);
+    if (!this.paused && !this.disposed && !this.resetting) this.scheduler.wake(actorId, reason);
   }
 
   join(position?: Point): SimulationDispatchOutcome {
+    if (this.disposed || this.resetting) return { status: 'skipped', reason: 'paused' };
     const outcome = this.room.joinPlayer(position);
     this.publish();
     return outcome;
   }
 
   async pause(): Promise<void> {
-    if (this.disposed || this.paused) return;
+    if (this.disposed || this.paused || this.resetting) return;
     this.paused = true;
     this.generation++;
     this.scheduler.pause('paused');
@@ -199,7 +201,7 @@ export class SimulationRuntime {
   }
 
   resumeRun(): void {
-    if (this.disposed || !this.paused) return;
+    if (this.disposed || this.resetting || !this.paused) return;
     this.paused = false;
     this.generation++;
     this.room.resume();
@@ -220,15 +222,22 @@ export class SimulationRuntime {
   importReplay(json: string): SimulationRoomCheckpoint { return this.importAudit(json); }
 
   async reset(): Promise<void> {
-    if (this.disposed) return;
-    const previous = this.room.checkpoint();
-    await this.persist(previous);
+    if (this.disposed || this.resetting) return;
+    // Establish a synchronous barrier before any save can yield. Aborting the
+    // scheduler synchronously terminalizes its decisions as cancelled.
+    this.resetting = true;
+    this.paused = true;
     this.generation++;
     this.stopLoops();
+    this.scheduler.pause('resetting');
+    this.room.pause();
+    const previous = this.room.checkpoint();
+    await this.persist(previous);
     this.scheduler.dispose();
     this.unsubscribeRoom?.();
     this.room.dispose();
     await this.startNewInternal(token());
+    this.resetting = false;
     this.beginLoops();
     this.publish();
   }

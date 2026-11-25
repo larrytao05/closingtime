@@ -77,6 +77,49 @@ test('held inference does not block player actions; pause terminalizes once and 
   await runtime.dispose();
 });
 
+test('reset cancels held inference before delayed persistence and serializes lifecycle changes', async () => {
+  let holdSaves = false;
+  let releaseSave!: () => void;
+  let saveEntered!: () => void;
+  const enteredSave = new Promise<void>(resolve => { saveEntered = resolve; });
+  const saveGate = new Promise<void>(resolve => { releaseSave = resolve; });
+  class DelayedSaveStore extends SimulationSaveStore {
+    override async save(...args: Parameters<SimulationSaveStore['save']>) {
+      if (holdSaves) { saveEntered(); await saveGate; }
+      return super.save(...args);
+    }
+  }
+  const store = new DelayedSaveStore(new MemoryStorage());
+  let resolveFetch!: (value: Response) => void;
+  let request: any;
+  const fetcher: typeof fetch = (_input, init) => {
+    request = JSON.parse(String(init?.body));
+    return new Promise(resolve => { resolveFetch = resolve; });
+  };
+  const runtime = await SimulationRuntime.start(runtimeOptions(store, fetcher));
+  runtime.wake('riley', 'reset race');
+  await until(() => !!request);
+  const oldRunId = runtime.getRunId();
+  holdSaves = true;
+  const reset = runtime.reset();
+  try {
+    await enteredSave;
+    const decision = runtime.snapshot().audit.entries.find(entry => entry.kind === 'decision');
+    assert.equal(runtime.snapshot().audit.entries.filter(entry => entry.kind === 'decision').length, 1);
+    assert.equal(decision?.kind === 'decision' ? decision.outcome : '', 'cancelled');
+    assert.equal(runtime.action('player', { type: 'speak' }, 'during reset').status, 'skipped');
+    await Promise.all([runtime.pause(), runtime.reset()]);
+    runtime.resumeRun();
+    resolveFetch(Response.json({ runId: request.runId, requestId: request.requestId, generation: request.generation,
+      actorId: request.actorId, actionId: request.options.find((item: any) => item.action.type === 'wait').actionId,
+      rationale: 'Late response.' }));
+    await tick();
+    assert.equal(runtime.getRunId(), oldRunId);
+    assert.equal(runtime.snapshot().audit.entries.filter(entry => entry.kind === 'committed-event' && entry.event.payload.type === 'speech').length, 0);
+  } finally { releaseSave(); await reset; await runtime.dispose(); }
+  assert.notEqual(runtime.getRunId(), oldRunId);
+});
+
 test('deadline gives an unresolved transport one failed terminal audit result', async () => {
   const store = new SimulationSaveStore(new MemoryStorage());
   let resolveFetch!: (value: Response) => void;
