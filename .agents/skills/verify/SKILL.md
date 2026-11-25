@@ -1,48 +1,56 @@
 ---
 name: verify
-description: Verify Closing Time's browser game, turn-based and real-time play, and audit exports using the compiled app, synthetic model fixtures, and private Site checks; use after game changes, for playtest audits, or before a release.
+description: Verify Closing Time locally with automated checks, browser playtests, audit exports, and real Gemini inference in turn-based and real-time modes. Use after game changes, for playtest audits, or before a release.
 ---
 
 # Verify Closing Time
 
-Read `features/README.md` and the relevant feature files; report each entry point that was not exercised. The UI is the primary surface; `/api/mara` is the model endpoint. `README.md` documents setup, controls, and fixture scenarios.
+Run all game checks against the local checkout. Read [the feature map](features/README.md) and the relevant feature files for the rendered journeys. Use synthetic dialogue and a disposable browser profile. Preserve existing browser data.
 
-## Launch
+## Build and run automated checks
 
-Work from the checkout root. Record `git rev-parse HEAD` and `git status --short`. Use Node 22.12+; run `npm ci` if needed, then run `git diff --check`, `npm run build`, `npm test`, and `node .agents/skills/verify/scripts/verify.mjs "$PWD"`. Both automated commands use fixtures. The bundled script checks five turn-based scenarios, legal action selection, the v1 audit schema, storage reload and quota handling, and invalid or failed turns. Do not reset existing browser data or drive another person's instance.
-
-For browser checks, use a disposable browser profile and an unused port. The fixture uses the real compiled client and worker but replaces Gemini; it never calls the provider. For example, after confirming port 4174 is free with `ss -ltn 'sport = :4174'`:
+Work from the checkout root. Record `git rev-parse HEAD` and `git status --short`. Use Node 22.12+ and run `npm ci` if dependencies are absent.
 
 ```bash
-mkdir -p /workspace/scratch/closingtime-verify
-node scripts/preview-fixture.mjs --port 4174 > /workspace/scratch/closingtime-verify/server.log 2>&1 &
-VERIFY_PID=$!
+git diff --check
+npm run build
+npm test
+node .agents/skills/verify/scripts/verify.mjs "$PWD"
 ```
 
-Keep the shell session and `VERIFY_PID` for cleanup; choose another port if occupied. Open `http://127.0.0.1:4174/?fixture=fixed&run=YOUR_UNIQUE_RUN` in the browser on the same machine. Use a unique alphanumeric run token and an isolated profile: fixture counters are per run, while audit records are per browser origin. A fresh rendered game with controls and Turn 0 is ready; an HTTP response alone is not readiness.
+The bundled verifier checks five turn-based and three real-time scenarios with deterministic responses. It covers HTTP validation, legal actions, observation projection, and turn audit persistence, quota fallback, and failure handling. Keep its results separate from real Gemini results.
 
-## Doctor
+## Run real Gemini inference against the local game
 
-Before interacting, check `kill -0 "$VERIFY_PID"`, verify the listening port belongs to the launched process (`ss -ltnp 'sport = :4174'`), and check `curl -fsS 'http://127.0.0.1:4174/?fixture=fixed&run=YOUR_UNIQUE_RUN'` returns the Closing Time page. In the browser confirm the URL, title, controls, fixture panel, and Turn 0. A failed check blocks the drive; do not use an unrelated server. Record the build revision and any dirty changes.
+Use `GEMINI_API_KEY` from the server process environment first. If it is unset or empty, let Node load it from `.env` in the checkout root. Never print, copy to a report, or commit the key, and do not source the file as shell code. If both sources lack a key, record Gemini checks as blocked and continue with the fixture checks.
 
-## Drive and evidence
+Use port 4173 for the real local server. Confirm it is free before launch. Start the compiled app from the checkout root with the following command, which uses the same entry point as `npm start` and gives you the server PID directly.
 
-Use an available supported browser automation surface to interact with the rendered game, using the labels and selectors in the feature map. Capture the action and resulting UI state as screenshots or browser snapshots under `/workspace/scratch/closingtime-verify/`, with the feature and run in filenames. Record commands, revision, fixture mode, outcomes, and failures in a text report there. Check side effects using the downloaded JSON; for fixture exports only, the fixture endpoint may retrieve the same JSON after the user clicks Export. Never treat fixture output as live model evidence. Use synthetic dialogue only and do not commit traces or credentials.
+```bash
+if [ -z "${GEMINI_API_KEY:-}" ]; then unset GEMINI_API_KEY; fi
+node --env-file-if-exists=.env scripts/serve.mjs &
+GEMINI_PID=$!
+```
 
-Live Gemini checks are separate and require a configured `GEMINI_API_KEY`, provider access, and authorization for model calls. Start the production server with `npm start` (in the current proxy-based cloud environment, `NODE_USE_ENV_PROXY=1 npm start`). Use a disposable browser profile and synthetic dialogue. Inspect Turn audit and verify the action, rationale, resulting state, and export. Do not print or save the key. Live responses vary; check legality and consistency rather than a particular action. Report live, fixture, and hosted results separately. The private Site may run a different revision. Record the tested GitHub revision and the deployed Site revision separately before making release claims.
+Set `NODE_USE_ENV_PROXY=1` on the server launch when the environment requires an outbound proxy and the Node version supports it. Confirm the launched process owns port 4173 and wait for the root URL to serve the compiled page. Run the real inference checks with:
 
-## Private Site release checks
+```bash
+node .agents/skills/verify/scripts/verify.mjs "$PWD" --gemini
+```
 
-- Before release, verify the compiled candidate in the browser and record the previous private Sites version as the rollback target. Confirm that the bare URL and an unknown mode open turn-based play. Use `?mode=live` for the real-time UI on the same origin.
-- Hold a fixture response while moving twice and performing a reachable interaction. Check that rain and player input continue. Cover window closure mid-route, pickup during inference, speech during movement, a blocked route, timeout or rate limiting, and a hidden tab. Pause, restart, or switch modes with an old response pending and verify it cannot affect the new scene or its audit.
-- Use both downloads to verify legacy v1 records survive real-time play, restart, and reload. For v2, compare what the model observed with the state at dispatch. Verify request, action, and session IDs, active time versus model latency, and pending versus terminal outcomes. Score the applied action and world separately from Mara’s stated explanation.
-- For an authorized hosted endpoint check, obtain the existing Site service credential via Sites. Pass it on stdin to `node .agents/skills/verify/scripts/verify.mjs "$PWD" --live https://closing-time-cafe.maroonchip32.chatgpt.site`. Use only this trusted private origin and keep credentials out of command arguments, files, and logs. This makes five synthetic calls through the **turn-based** Gemini contract. Verify the real-time contract with a separate bounded synthetic request where authorized. Use a signed-in browser for hosted UI checks and report its availability separately from endpoint results.
-- Review live decisions for legal actions, response to player intervention, and consistency among the rationale, applied action, and resulting state. Several actions can be reasonable. Report reproducible mismatches and distinguish fixture, live endpoint, and rendered browser evidence.
+This calls the real app's local `/api/mara` endpoint. The five turn-based requests cover waiting, closing the window, picking up the papers, coordinating via speech, and asking about papers already held. The three real-time requests cover initial rain, the player having closed the window, and the player holding the papers and speaking while Mara is walking. Check response status, legal options, selected action, model and rationale, plus request/session identity and observation state in real-time mode. Record latency and any provider errors. A missing credential, timeout, or rate limit leaves the affected checks unverified.
 
-## Cleanup
+Play both modes in the rendered browser at `http://127.0.0.1:4173/` and `http://127.0.0.1:4173/?mode=live` without fixture parameters. Confirm that the bare URL and an unknown mode start turn-based play. In turn-based play, take a turn and inspect **Turn audit**. In real-time play, move and speak while a request is pending if timing permits, then inspect **Scene audit** for a completed Gemini decision and its applied or skipped outcome. Download and inspect both trace formats. Match a real-time request's observation, model, selected action, rationale, and terminal outcome to the audit and resulting scene. Review whether Mara accounted for the player's actions and whether the rationale describes the selected action and actual effect. Accept any legal, contextually reasonable choice. Use the delayed fixture to verify concurrency when Gemini responds too quickly to observe it.
 
-Close only the browser tab/profile created for this run. In the launch shell run `kill "$VERIFY_PID"` and `wait "$VERIFY_PID" 2>/dev/null || true`; verify the process has exited. Never kill by process name or delete another session's browser data. Keep `/workspace/scratch/closingtime-verify/` evidence after cleanup and confirm it remains readable.
+## Exercise timing, failure, and persistence in the browser
 
-## Helpers
+Start `node scripts/preview-fixture.mjs --port 4174` on a free port and keep its PID. Confirm the process owns the listening port and serves the game. Open `http://127.0.0.1:4174/?fixture=fixed&run=UNIQUE` in the browser. Check the title, controls, fixture panel, and initial room state. Use a unique alphanumeric run token for each journey.
 
-The project supplies `node scripts/preview-fixture.mjs --port 4174`; see the README for scenarios and `features/` for UI journeys. Use the bundled `scripts/verify.mjs` for automated contract checks. Drive rendered journeys with the supported browser surface. If browser control is unavailable, report which features remain unverified in the browser. HTTP and automated checks provide separate evidence.
+- Follow the feature map for movement, Wait, speech, interactions, invalid input, failed turns, restart, and reload. Verify rain and player input while a response is held. Cover closing the window mid-route, picking up papers during inference, speech during movement, a blocked route, timeout, rate limiting, and a hidden tab. Pause, restart, or switch modes with an old response pending and confirm that it cannot affect a new session.
+- Verify the v1 export across real-time play, restart, and reload. In the v2 export, check session, request, and action IDs, active time and model latency, pending and terminal outcomes, and the observed versus dispatch revisions. Reproduce a late close that is skipped after the player already closed the window. For fixtures, the preview endpoint can retrieve the JSON after the export button is clicked.
+
+## Record evidence and clean up
+
+Save commands, revision, server type, cases, screenshots or snapshots, and downloaded synthetic traces in a scratch directory. Report fixture checks, local Gemini endpoint checks, and local Gemini browser checks separately. Identify each failed or blocked entry point, including when the browser cannot expose a download. Keep evidence and credentials out of Git.
+
+Close only the tabs or profiles created for the run. Stop each server by its recorded PID, wait for it to exit, and confirm the evidence is still readable.

@@ -93,7 +93,8 @@ Inspect `/__fixture?key=<fixture>:<run>&export=1` or `export=2`. Use synthetic
 dialogue in this fixture. Its model requests do not count toward the Gemini
 quota.
 
-The private ChatGPT Site uses its existing server-side model credential.
-Record the GitHub source revision and the separate Sites revision and
-deployment when verifying a hosted release. Run hosted model checks
-separately from rendered fixture checks.
+For real inference verification, start the local game with `npm start` and run
+`node .agents/skills/verify/scripts/verify.mjs "$PWD" --gemini`. Set
+`GEMINI_API_KEY` in the environment or in the checkout's `.env` file. The
+verifier checks both game modes through the local server. The verification
+guide also covers rendered play and audit exports.
