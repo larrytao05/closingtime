@@ -143,7 +143,7 @@ export async function chooseSimulationDecision(request: SimulationDecisionReques
   if (!env.GEMINI_API_KEY) throw new SimulationAgentError('missing-key');
   const profile = profiles[request.actorId as NpcId];
   const prompt = `You are ${profile.name}, a café coworker. Your voice is ${profile.voice}. Respond naturally to this moment and choose one available action. There is no closing objective, score, or required task. Do not invent facts, claim actions you did not choose, or treat spoken claims as changes to the room. Speak briefly only when selecting a speak option. Return optional memory proposals only for exact witnessed dialogue lines. Choose exactly one action.`;
-  let result: { selection: Record<string, unknown>; model: string };
+  let result: { selection: Record<string, unknown>; model: string; responseId?: string };
   try { result = await generateGemini({ input: providerProjection(request), prompt, schema: schema(request), env, signal }); }
   catch (error) {
     if (error instanceof LiveMaraRequestError) {
@@ -160,7 +160,7 @@ export async function chooseSimulationDecision(request: SimulationDecisionReques
   if (!memoryProposals) throw new SimulationAgentError('invalid-response');
   return { runId: request.runId, requestId: request.requestId, generation: request.generation, actorId: request.actorId,
     actionId: option.actionId, ...(option.action.type === 'speak' && typeof selection.reply === 'string' ? { reply: selection.reply.trim() } : {}),
-    rationale: selection.rationale.trim(), modelResponseId: result.model, ...(memoryProposals.length ? { memoryProposals } : {}) };
+    rationale: selection.rationale.trim(), ...(result.responseId ? { modelResponseId: result.responseId } : {}), ...(memoryProposals.length ? { memoryProposals } : {}) };
 }
 
 /** Assemble a new provider object from parsed safe fields; caller-owned envelopes are never serialized. */

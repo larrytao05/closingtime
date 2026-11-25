@@ -33,18 +33,22 @@ test('provider projection sent for Jo contains only witnessed local fields and v
   globalThis.fetch = async (_input, init) => {
     const body = JSON.parse(String(init?.body));
     sent = JSON.parse(body.contents[0].parts[0].text);
-    return Response.json({ modelVersion: 'fixture-model', candidates: [{ content: { parts: [{ text: JSON.stringify({ actionId: 'speak-1', reply: 'I saw you move over.', rationale: 'Mara is nearby.', memoryProposals: [] }) }] } }] });
+    return Response.json({ modelVersion: 'fixture-model', responseId: 'gemini-response-1', candidates: [{ content: { parts: [{ text: JSON.stringify({ actionId: 'speak-1', reply: 'I saw you move over.', rationale: 'Mara is nearby.', memoryProposals: [] }) }] } }] });
   };
   try {
     const parsed = readSimulationDecisionRequest(request());
     assert.ok(parsed);
     const reply = await chooseSimulationDecision(parsed, { GEMINI_API_KEY: 'fixture-only' }, new AbortController().signal);
     assert.equal(reply.actionId, 'speak-1');
+    assert.equal(reply.modelResponseId, 'gemini-response-1');
     assert.deepEqual(Object.keys(sent!).sort(), ['actorId','activeTimeMs','options','rainExposureMs','recall','revision','selfPosition','visibleActors','visibleObjects','windowOpen','witnessedEvents'].sort());
     assert.equal(JSON.stringify(sent).includes('wholeWorld'), false);
     assert.equal(JSON.stringify(sent).includes('afterCheckpoint'), false);
     assert.equal((sent!.recall as { records: { sourceEventIds: string[] }[] }).records[0].sourceEventIds[0], 'run-1:2');
     assert.equal((sent!.recall as { actorId: string }).actorId, 'jo');
+    globalThis.fetch = async () => Response.json({ modelVersion: 'fixture-model-without-response-id', candidates: [{ content: { parts: [{ text: JSON.stringify({ actionId: 'walk-1', reply: null, rationale: 'The tile is clear.', memoryProposals: [] }) }] } }] });
+    const noIdReply = await chooseSimulationDecision(parsed, { GEMINI_API_KEY: 'fixture-only' }, new AbortController().signal);
+    assert.equal('modelResponseId' in noIdReply, false);
     globalThis.fetch = async () => Response.json({ candidates: [{ content: { parts: [{ text: JSON.stringify({ actionId: 'other', reply: null, rationale: 'bad', memoryProposals: [] }) }] } }] });
     await assert.rejects(() => chooseSimulationDecision(parsed, { GEMINI_API_KEY: 'fixture-only' }, new AbortController().signal), /invalid-response/);
   } finally { globalThis.fetch = oldFetch; }
@@ -95,6 +99,42 @@ test('scheduler retries a rate-limited start after a global backoff and cancels 
   assert.equal(calls, 2);
   scheduler.pause(); scheduler.wake('riley', 'external');
   assert.equal(calls, 2);
+  scheduler.dispose();
+});
+
+test('scheduler applies positive global fallback backoff for a rate limit without Retry-After', async () => {
+  let now = 0; let nextTimer = 0; let calls = 0; const started: string[] = [];
+  const timers = new Map<number, { at: number; callback: () => void }>();
+  const scheduler = new SimulationScheduler({ now: () => now, maxInFlight: 1, deadlineMs: 15_000,
+    setTimer: ((callback: TimerHandler, delay = 0) => {
+      const id = ++nextTimer;
+      timers.set(id, { at: now + Number(delay), callback: callback as () => void });
+      return id;
+    }) as typeof setTimeout,
+    clearTimer: ((id: number) => { timers.delete(id); }) as typeof clearTimeout,
+    startDecision: async actor => {
+      calls++;
+      started.push(actor);
+      if (calls === 1) throw new SimulationRateLimitError(0); // missing or invalid Retry-After
+    },
+  });
+  const advanceTo = async (target: number) => {
+    now = target;
+    for (const [id, timer] of [...timers]) {
+      if (timer.at <= now) { timers.delete(id); timer.callback(); }
+    }
+    await new Promise(resolve => setImmediate(resolve));
+  };
+  scheduler.wake('mara', 'external');
+  scheduler.wake('jo', 'external');
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(calls, 1);
+  await advanceTo(999);
+  assert.equal(calls, 1, 'the retry and other actors remain blocked before the positive fallback expires');
+  assert.deepEqual(started, ['mara']);
+  await advanceTo(1_000);
+  assert.equal(calls, 3, 'the queued actor and capped retry resume when the fallback expires');
+  assert.ok(started.includes('jo'));
   scheduler.dispose();
 });
 

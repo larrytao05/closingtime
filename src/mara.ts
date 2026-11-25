@@ -79,7 +79,7 @@ async function askGemini<T extends { availableActions: { id: string }[] }>(
 /** Shared Gemini transport for legacy and simulation decisions. */
 export async function generateGemini(args: {
   input: unknown; prompt: string; schema: Record<string, unknown>; env: ModelEnvironment; signal: AbortSignal;
-}): Promise<{ selection: Record<string, unknown>; model: string }> {
+}): Promise<{ selection: Record<string, unknown>; model: string; responseId?: string }> {
   const { input, prompt, schema, env, signal } = args;
   const requestedModel = env.GEMINI_MODEL || 'gemini-3.1-flash-lite';
   const timeout = AbortSignal.timeout(15000);
@@ -117,7 +117,8 @@ export async function generateGemini(args: {
     const selection: unknown = JSON.parse(output);
     if (!selection || typeof selection !== 'object' || Array.isArray(selection)) throw new Error('Missing selection');
     const model = typeof data.modelVersion === 'string' ? data.modelVersion : requestedModel;
-    return { selection: selection as Record<string, unknown>, model };
+    const responseId = typeof data.responseId === 'string' && data.responseId.trim() ? data.responseId : undefined;
+    return { selection: selection as Record<string, unknown>, model, ...(responseId ? { responseId } : {}) };
   } catch {
     throw new LiveMaraRequestError(timeout.aborted ? 'timeout' : 'invalid-response');
   }

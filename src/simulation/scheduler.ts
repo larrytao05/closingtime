@@ -5,6 +5,7 @@ export class SimulationRateLimitError extends Error {
 }
 type Job = { actorId: NpcId; reason: string; retries: number; token: number };
 type Running = { job: Job; controller: AbortController; token: number; deadline: ReturnType<typeof setTimeout> };
+type TimerHandle = ReturnType<typeof setTimeout>;
 
 /**
  * Fair scene-wide decision queue. Each wake carries one coalesced pending reason
@@ -17,6 +18,8 @@ export class SimulationScheduler {
   private readonly deadlineMs: number;
   private readonly startsPerMinute: number;
   private readonly replyWakeCap: number;
+  private readonly setTimer: typeof setTimeout;
+  private readonly clearTimerFn: typeof clearTimeout;
   private pending = new Map<NpcId, Job>();
   private order: NpcId[] = [];
   private running = new Map<NpcId, Running>();
@@ -27,13 +30,14 @@ export class SimulationScheduler {
   private epoch = 0;
   private nextToken = 1;
   private blockedUntil = 0;
-  private timer: ReturnType<typeof setTimeout> | undefined;
+  private timer: TimerHandle | undefined;
 
-  constructor(options: { now: () => number; startDecision: (actorId: NpcId, reason: string, signal: AbortSignal) => Promise<void>; maxInFlight?: number; deadlineMs?: number; startsPerMinute?: number; replyWakeCap?: number }) {
+  constructor(options: { now: () => number; startDecision: (actorId: NpcId, reason: string, signal: AbortSignal) => Promise<void>; maxInFlight?: number; deadlineMs?: number; startsPerMinute?: number; replyWakeCap?: number; setTimer?: typeof setTimeout; clearTimer?: typeof clearTimeout }) {
     this.now = options.now; this.startDecision = options.startDecision;
     this.maxInFlight = options.maxInFlight ?? 2;
     this.deadlineMs = options.deadlineMs ?? 15_000; this.startsPerMinute = options.startsPerMinute ?? 12;
     this.replyWakeCap = options.replyWakeCap ?? 3;
+    this.setTimer = options.setTimer ?? setTimeout; this.clearTimerFn = options.clearTimer ?? clearTimeout;
   }
 
   wake(actorId: NpcId, reason: string): void {
@@ -64,13 +68,13 @@ export class SimulationScheduler {
   dispose(): void { if (this.disposed) return; this.cancelAll('disposed'); this.disposed = true; }
 
   private abortRunning() {
-    for (const item of this.running.values()) { clearTimeout(item.deadline); item.controller.abort(); }
+    for (const item of this.running.values()) { this.clearTimerFn(item.deadline); item.controller.abort(); }
     this.running.clear();
   }
-  private clearTimer() { if (this.timer) clearTimeout(this.timer); this.timer = undefined; }
+  private clearTimer() { if (this.timer) this.clearTimerFn(this.timer); this.timer = undefined; }
   private schedule(at: number) {
     this.clearTimer();
-    this.timer = setTimeout(() => { this.timer = undefined; this.pump(); }, Math.max(0, at - this.now()));
+    this.timer = this.setTimer(() => { this.timer = undefined; this.pump(); }, Math.max(0, at - this.now()));
   }
   private pump() {
     if (this.disposed || this.paused) return;
@@ -87,7 +91,7 @@ export class SimulationScheduler {
       this.pending.delete(actorId);
       const controller = new AbortController(); const token = this.nextToken++;
       const epoch = this.epoch;
-      const deadline = setTimeout(() => {
+      const deadline = this.setTimer(() => {
         if (this.running.get(actorId)?.token !== token) return;
         controller.abort(); this.running.delete(actorId); this.pump();
       }, this.deadlineMs);
@@ -103,17 +107,22 @@ export class SimulationScheduler {
   }
   private finish(actorId: NpcId, token: number, epoch: number) {
     if (epoch !== this.epoch || this.running.get(actorId)?.token !== token) return;
-    const running = this.running.get(actorId)!; clearTimeout(running.deadline); this.running.delete(actorId);
+    const running = this.running.get(actorId)!; this.clearTimerFn(running.deadline); this.running.delete(actorId);
     this.rotatePendingActor(actorId); this.pump();
   }
   private failed(actorId: NpcId, token: number, epoch: number, error: unknown) {
     if (epoch !== this.epoch || this.running.get(actorId)?.token !== token) return;
     const current = this.running.get(actorId)!;
-    clearTimeout(current.deadline);
+    this.clearTimerFn(current.deadline);
     const { job } = current;
     this.running.delete(actorId);
     if (error instanceof SimulationRateLimitError) {
-      const delay = Math.max(0, Math.min(120_000, error.retryAfterMs));
+      // Retry-After is often omitted on 429s. Use a bounded per-job backoff so
+      // even a provider that omits it cannot cause an immediate global burst.
+      const fallbackDelay = Math.min(120_000, 1_000 * (2 ** job.retries));
+      const delay = Number.isFinite(error.retryAfterMs) && error.retryAfterMs > 0
+        ? Math.min(120_000, error.retryAfterMs)
+        : fallbackDelay;
       this.blockedUntil = Math.max(this.blockedUntil, this.now() + delay);
       if (job.retries < 2 && !this.pending.has(actorId)) {
         job.retries++;
