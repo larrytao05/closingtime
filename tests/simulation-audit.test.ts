@@ -38,6 +38,19 @@ test('replays retained committed state then applies exact exported clock metadat
   assert.deepEqual(audit.eventsFor('jo'), []);
 });
 
+test('public snapshots stay detached while JSON export matches their validated envelope', () => {
+  const audit = new SimulationAudit();
+  audit.start('isolated-run', checkpoint());
+  const final = checkpoint(12);
+  const snapshot = audit.snapshot(final);
+  snapshot.startingCheckpoint.actors.mara.x = 99;
+  snapshot.finalCheckpoint.objects.papers.wetness = 1;
+  const fresh = audit.snapshot(final);
+  assert.equal(fresh.startingCheckpoint.actors.mara.x, 2);
+  assert.equal(fresh.finalCheckpoint.objects.papers.wetness, 0);
+  assert.equal(audit.exportJSON(final), JSON.stringify(fresh));
+});
+
 test('accepts fractional active clock and exposure values throughout audit records', () => {
   const audit = new SimulationAudit();
   const start = checkpoint(0.125);

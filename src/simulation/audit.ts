@@ -83,14 +83,32 @@ export class SimulationAudit {
   }
 
   exportJSON(finalCheckpoint: SimulationRoomCheckpoint): string {
-    return JSON.stringify(this.snapshot(finalCheckpoint));
+    this.assertStarted();
+    assertCheckpoint(finalCheckpoint, 'final checkpoint');
+    // Entries and the starting checkpoint are private, owned data. Validate the
+    // envelope without detaching it, then serialize immediately.
+    const snapshot: AuditSnapshot = {
+      schemaVersion: 3,
+      runId: this.runId!,
+      startingCheckpoint: this.startingCheckpoint!,
+      startingCheckpointProvenance: this.startingCheckpointProvenance!,
+      firstRetainedSequence: this.firstRetainedSequence(),
+      entries: this.entries,
+      prunedThroughSequence: this.prunedThroughSequence,
+      finalCheckpoint,
+      finalCheckpointProvenance: {
+        runId: this.runId!, throughSequence: this.lastSequence, revision: finalCheckpoint.revision,
+      },
+    };
+    validateAuditSnapshotInternal(snapshot, false);
+    return JSON.stringify(snapshot);
   }
 
   /** Validate first, then install. Invalid imported final state is never restored. */
   restore(snapshot: unknown): void {
     const validated = validateAuditSnapshot(snapshot);
     // Replay is deliberately part of restore validation; it verifies non-clock state.
-    this.replay(validated);
+    replayValidatedSnapshot(validated);
     this.runId = validated.runId;
     this.startingCheckpoint = clone(validated.startingCheckpoint);
     this.startingCheckpointProvenance = clone(validated.startingCheckpointProvenance);
@@ -110,22 +128,7 @@ export class SimulationAudit {
 
   replay(snapshot: unknown): SimulationRoomCheckpoint {
     const checked = validateAuditSnapshot(snapshot);
-    let state = clone(checked.startingCheckpoint);
-    let lastSequence = checked.startingCheckpointProvenance.throughSequence;
-    for (const entry of checked.entries) {
-      if (entry.kind !== 'committed-event') continue;
-      validateCommittedEvent(entry.event, checked.runId, lastSequence);
-      state = clone(entry.event.afterCheckpoint);
-      lastSequence = entry.event.sequence;
-    }
-    if (lastSequence !== checked.finalCheckpointProvenance.throughSequence)
-      throw new Error('Replay event cursor does not match final checkpoint provenance.');
-    if (!sameNonClockState(state, checked.finalCheckpoint))
-      throw new Error('Replay state differs from exported final committed state.');
-    // Time/exposure can advance without a material event. Apply only after state checks.
-    state.activeTimeMs = checked.finalCheckpoint.activeTimeMs;
-    state.rainExposureMs = checked.finalCheckpoint.rainExposureMs;
-    return state;
+    return replayValidatedSnapshot(checked);
   }
 
   eventsFor(actorId: SimulationActorId): SimulationAuditEntry[] {
@@ -173,6 +176,10 @@ export class SimulationAudit {
 
 /** Validates untrusted schema-v3 JSON and returns a detached, typed snapshot. */
 export function validateAuditSnapshot(value: unknown): AuditSnapshot {
+  return validateAuditSnapshotInternal(value, true);
+}
+
+function validateAuditSnapshotInternal(value: unknown, detach: boolean): AuditSnapshot {
   if (!isRecord(value) || value.schemaVersion !== 3 || typeof value.runId !== 'string' || !value.runId.trim() ||
     !Array.isArray(value.entries) || value.entries.length > SIMULATION_AUDIT_MAX_ENTRIES ||
     byteLength(value) > SIMULATION_AUDIT_MAX_BYTES)
@@ -219,7 +226,28 @@ export function validateAuditSnapshot(value: unknown): AuditSnapshot {
   const expectedFirst = lastEventSequence === undefined ? end.throughSequence + 1 :
     snapshot.entries.find((entry): entry is Extract<SimulationAuditEntry, { kind: 'committed-event' }> => entry.kind === 'committed-event')!.event.sequence;
   if (snapshot.firstRetainedSequence !== expectedFirst) throw new Error('Audit retained event boundary is inconsistent.');
-  return clone(snapshot);
+  return detach ? clone(snapshot) : snapshot;
+}
+
+/** Replay a snapshot whose full schema and event chain have already been checked. */
+function replayValidatedSnapshot(checked: AuditSnapshot): SimulationRoomCheckpoint {
+  let lastEvent: Extract<SimulationAuditEntry, { kind: 'committed-event' }> | undefined;
+  for (let index = checked.entries.length - 1; index >= 0; index--) {
+    const entry = checked.entries[index];
+    if (entry.kind === 'committed-event') { lastEvent = entry; break; }
+  }
+  const lastSequence = lastEvent?.kind === 'committed-event'
+    ? lastEvent.event.sequence : checked.startingCheckpointProvenance.throughSequence;
+  if (lastSequence !== checked.finalCheckpointProvenance.throughSequence)
+    throw new Error('Replay event cursor does not match final checkpoint provenance.');
+  const state = clone(lastEvent?.kind === 'committed-event'
+    ? lastEvent.event.afterCheckpoint : checked.startingCheckpoint);
+  if (!sameNonClockState(state, checked.finalCheckpoint))
+    throw new Error('Replay state differs from exported final committed state.');
+  // Time/exposure can advance without a material event. Apply only after state checks.
+  state.activeTimeMs = checked.finalCheckpoint.activeTimeMs;
+  state.rainExposureMs = checked.finalCheckpoint.rainExposureMs;
+  return state;
 }
 
 /** Resolve source event references without pretending pruned evidence is absent. */
