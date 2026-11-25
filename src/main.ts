@@ -5,6 +5,7 @@ import type { Action, ActorId, Interaction, ObjectId, Point } from './world';
 import { TraceLog } from './trace-log';
 import { LiveGame } from './live-game';
 import type { LiveMaraAction } from './live-mara-protocol';
+import { SimulationView } from './simulation/view';
 import './style.css';
 
 const cell = 86;
@@ -20,6 +21,7 @@ const labels: Record<ObjectId, string> = {
 };
 
 const liveMode = new URLSearchParams(location.search).get('mode') === 'live';
+const simulationMode = new URLSearchParams(location.search).get('mode') === 'simulation';
 const heldDirections = new Map<string, [number, number]>();
 
 let world = createWorld();
@@ -34,7 +36,15 @@ let activity: string[] = [];
 
 const element = <T extends HTMLElement>(id: string) => document.getElementById(id) as T;
 const modeLink = element<HTMLAnchorElement>('mode-link');
-if (liveMode) {
+if (simulationMode) {
+  element('legacy-app').hidden = true;
+  element<HTMLButtonElement>('reset').hidden = true;
+  element('page-tagline').textContent = 'An autonomous café scene. Observe the cast or join when you like.';
+  modeLink.href = '?mode=live';
+  modeLink.textContent = 'Play real-time';
+  element('simulation-entry').hidden = true;
+  element('simulation-app').hidden = false;
+} else if (liveMode) {
   const turnBasedUrl = new URL(location.href);
   turnBasedUrl.searchParams.delete('mode');
   modeLink.href = turnBasedUrl.toString();
@@ -424,7 +434,7 @@ class CafeScene extends Phaser.Scene {
   }
 }
 
-new Phaser.Game({
+if (!simulationMode) new Phaser.Game({
   type: Phaser.AUTO,
   parent: 'room',
   width,
@@ -505,4 +515,8 @@ element('reset').addEventListener('click', () => {
   latestRationale = '';
   update();
 });
+if (simulationMode) {
+  const simulation = new SimulationView();
+  element('simulation-new-scene').addEventListener('click', () => void simulation.start(false));
+}
 update();
