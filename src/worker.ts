@@ -1,9 +1,9 @@
 import page from '../dist/client/index.html?raw';
-import { chooseMara, isObservation, type ModelEnvironment } from './mara';
+import { chooseLiveMara, chooseMara, isObservation, type ModelEnvironment } from './mara';
+import { isLiveMode, LiveMaraRequestError, readLiveMaraRequest } from './live-mara-protocol';
 
-const json = (body: object, status = 200) => Response.json(body, {
-  status, headers: { 'Cache-Control': 'no-store' },
-});
+const json = (body: object, status = 200, headers: Record<string, string> = {}) =>
+  Response.json(body, { status, headers: { 'Cache-Control': 'no-store', ...headers } });
 
 export default {
   async fetch(request: Request, env: ModelEnvironment): Promise<Response> {
@@ -25,6 +25,22 @@ export default {
       observation = JSON.parse(body);
     } catch {
       return json({ error: 'Invalid observation.' }, 400);
+    }
+
+    if (isLiveMode(observation)) {
+      const live = readLiveMaraRequest(observation);
+      if (!live) return json({ error: 'Invalid observation.' }, 400);
+      try {
+        return json(await chooseLiveMara(live, env, request.signal));
+      } catch (error) {
+        const reason = error instanceof LiveMaraRequestError ? error.reason : 'provider-error';
+        const status = reason === 'rate-limited' ? 429 : reason === 'timeout' ? 504 : reason === 'unavailable' ? 503 : 502;
+        const headers: Record<string, string> = {};
+        if (error instanceof LiveMaraRequestError && status === 429 && error.retryAfterMs > 0) {
+          headers['Retry-After'] = String(Math.ceil(error.retryAfterMs / 1000));
+        }
+        return json({ error: 'Mara couldn’t decide what to do.', reason }, status, headers);
+      }
     }
 
     if (!isObservation(observation)) return json({ error: 'Invalid observation.' }, 400);

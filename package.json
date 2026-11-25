@@ -5,7 +5,8 @@
   "type": "module",
   "scripts": {
     "build": "tsc --noEmit && vite build --outDir dist/client && node scripts/inline-client.mjs && vite build --ssr src/worker.ts --outDir dist/server && node scripts/site-output.mjs",
-    "start": "node --env-file-if-exists=.env scripts/serve.mjs"
+    "start": "node --env-file-if-exists=.env scripts/serve.mjs",
+    "test": "node scripts/test.mjs"
   },
   "dependencies": {
     "phaser": "3.90.0"

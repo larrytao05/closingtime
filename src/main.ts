@@ -3,6 +3,8 @@ import { playTurn, requestMara, type PlayedTurn } from './planner';
 import { actionsFor, createWorld, layout } from './world';
 import type { Action, ActorId, Interaction, ObjectId, Point } from './world';
 import { TraceLog } from './trace-log';
+import { LiveGame } from './live-game';
+import type { LiveMaraAction } from './live-mara-protocol';
 import './style.css';
 
 const cell = 86;
@@ -17,7 +19,11 @@ const labels: Record<ObjectId, string> = {
   towel: 'Towel',
 };
 
+const liveMode = new URLSearchParams(location.search).get('mode') === 'live';
+const heldDirections = new Map<string, [number, number]>();
+
 let world = createWorld();
+let liveGame: LiveGame | undefined;
 let pending: AbortController | undefined;
 let recentTurns: PlayedTurn[] = [];
 let sessionId = crypto.randomUUID();
@@ -27,6 +33,28 @@ let room: CafeScene | undefined;
 let activity: string[] = [];
 
 const element = <T extends HTMLElement>(id: string) => document.getElementById(id) as T;
+const modeLink = element<HTMLAnchorElement>('mode-link');
+if (liveMode) {
+  const turnBasedUrl = new URL(location.href);
+  turnBasedUrl.searchParams.delete('mode');
+  modeLink.href = turnBasedUrl.toString();
+  modeLink.textContent = 'Play turn-based';
+  element('movement-help').textContent = 'Hold arrow keys or WASD to walk, or tap a floor tile.';
+  element('audit-title').textContent = 'Scene audit';
+  element('export-traces').textContent = 'Export turn-based traces';
+  for (const id of ['live-selected', 'live-outcome', 'export-timeline', 'timeline-status']) element(id).hidden = false;
+}
+
+function reportAction(action: Action, actor: ActorId) {
+  const entry = describe(action, actor);
+  if (entry) activity = [...activity.slice(-7), entry];
+}
+
+function resetFeedback() {
+  activity = [];
+  element<HTMLInputElement>('say').value = '';
+  element('feedback').textContent = '';
+}
 
 function describe(action: Action, actor: ActorId) {
   const name = actor === 'player' ? 'You' : 'Mara';
@@ -42,6 +70,12 @@ function describe(action: Action, actor: ActorId) {
 }
 
 async function act(action: Action): Promise<boolean> {
+  if (liveGame) {
+    element('feedback').textContent = '';
+    const result = liveGame.act(action);
+    if (!result.ok) element('feedback').textContent = result.reason;
+    return result.ok;
+  }
   if (pending) return false;
   const request = new AbortController();
   pending = request;
@@ -60,8 +94,8 @@ async function act(action: Action): Promise<boolean> {
     latestRationale = decision.rationale;
     traceLog.append({ sessionId, recordedAt: new Date().toISOString(), ...result.trace });
     recentTurns = [...recentTurns.slice(-7), { player: action, mara: decision.action }];
-    activity.push(describe(action, 'player'), describe(decision.action, 'mara'));
-    activity = activity.filter(Boolean).slice(-8);
+    reportAction(action, 'player');
+    reportAction(decision.action, 'mara');
     return true;
   } catch (error) {
     if (pending === request) {
@@ -92,6 +126,13 @@ function interactionLabel(action: Interaction) {
   }
 }
 
+function selectedAction(action: LiveMaraAction): string {
+  if (action.type === 'walkTo') return `Walk to tile (${action.to.x}, ${action.to.y})`;
+  if (action.type === 'speak') return `Say “${action.text}”`;
+  if (action.type === 'move') return `Move to tile (${action.to.x}, ${action.to.y})`;
+  return interactionLabel(action);
+}
+
 function update() {
   const paper = world.objects.papers;
   const exposed = world.windowOpen && 'surface' in paper.location && paper.location.surface === 'table';
@@ -99,14 +140,26 @@ function update() {
     const location = world.objects[id].location;
     return 'heldBy' in location && location.heldBy === 'player';
   });
-  element('turn').textContent = `Turn ${world.turn}`;
+  updateClock();
   element('window').textContent = world.windowOpen ? 'Open' : 'Closed';
   element('papers').textContent = paper.wetness ? `Wetness ${paper.wetness}${exposed ? ' · Exposed' : ''}` : exposed ? 'Dry · Exposed' : 'Dry';
   element('papers').classList.toggle('exposed', exposed);
   element('hands').textContent = handIds.map(id => labels[id]).join(', ') || 'Empty';
   const lastTurn = recentTurns.at(-1);
-  element('intent').textContent = pending ? 'Mara is thinking…' : lastTurn ? actionSummary(lastTurn.mara) : 'Your turn.';
-  element('rationale').textContent = latestRationale || 'Mara’s stated rationale appears after she acts.';
+  element('intent').textContent = (liveGame?.snapshot.paused ? 'Scene paused.' : liveGame?.status)
+    ?? (pending ? 'Mara is thinking…' : lastTurn ? actionSummary(lastTurn.mara) : 'Your turn.');
+  const rationale = liveGame?.rationale ?? latestRationale;
+  element('rationale').textContent = rationale || (liveMode
+    ? 'Mara’s stated rationale appears after she chooses an action.'
+    : 'Mara’s stated rationale appears after she acts.');
+  if (liveGame) {
+    element('live-selected').textContent = liveGame.selected ? `Selected: ${selectedAction(liveGame.selected)}` : '';
+    element('live-outcome').textContent = liveGame.outcome ? `Outcome: ${liveGame.outcome}` : '';
+    element<HTMLButtonElement>('export-timeline').disabled = liveGame.trace.count === 0;
+    element('timeline-status').textContent = liveGame.trace.needsExport
+      ? 'Browser storage is unavailable or full. Export before closing this tab.'
+      : `${liveGame.trace.count} events. Traces include in-game dialogue.`;
+  }
   element<HTMLButtonElement>('export-traces').disabled = traceLog.count === 0;
   element('trace-status').textContent = traceLog.needsExport
     ? 'Browser storage is unavailable or full. Export before closing this tab.'
@@ -122,13 +175,15 @@ function update() {
 
   const actions = element('actions');
   const oldFocus = (document.activeElement as HTMLElement | null)?.dataset.action;
-  actions.replaceChildren(...actionsFor(world, 'player').interactions().map(action => {
+  const available = actionsFor(world, 'player').interactions().filter(action => !liveMode || action.type !== 'wait');
+  actions.replaceChildren(...available.map(action => {
     const label = interactionLabel(action);
     const button = document.createElement('button');
     button.type = 'button';
     button.textContent = label;
     button.dataset.action = label;
     button.setAttribute('aria-disabled', String(Boolean(pending)));
+    button.disabled = Boolean(liveGame?.playerMoving);
     if (action.type === 'wait') button.className = 'quiet';
     button.addEventListener('click', () => act(action));
     return button;
@@ -141,20 +196,35 @@ function update() {
   room?.drawRoom();
 }
 
+function updateClock() {
+  const time = liveGame?.snapshot;
+  const label = time ? `${Math.floor(time.activeMs / 1000)}s${time.paused ? ' · Paused' : ''}` : `Turn ${world.turn}`;
+  const timer = element('turn');
+  if (timer.textContent !== label) timer.textContent = label;
+}
+
 function move(dx: number, dy: number) {
   const { x, y } = world.actors.player.position;
-  act({ type: 'move', to: { x: x + dx, y: y + dy } });
+  if (liveGame) liveGame.walk({ x: x + dx, y: y + dy });
+  else void act({ type: 'move', to: { x: x + dx, y: y + dy } });
 }
 
 class CafeScene extends Phaser.Scene {
   private art!: Phaser.GameObjects.Graphics;
   private signs!: Phaser.GameObjects.Container;
+  private actorArt!: Phaser.GameObjects.Graphics;
+  private actorLabels!: Record<ActorId, Phaser.GameObjects.Text>;
   private hover: Point | undefined;
 
   create() {
     this.game.canvas.setAttribute('aria-label', 'Top-down café room');
     this.art = this.add.graphics();
     this.signs = this.add.container();
+    this.actorArt = this.add.graphics();
+    this.actorLabels = {
+      player: this.createLabel('You', '#b0ddd7'),
+      mara: this.createLabel('Mara', '#f4b887'),
+    };
     this.input.on('pointermove', (pointer: Phaser.Input.Pointer) => {
       const tile = this.tileAt(pointer);
       if (tile.x !== this.hover?.x || tile.y !== this.hover?.y) {
@@ -164,10 +234,40 @@ class CafeScene extends Phaser.Scene {
     });
     this.input.on('gameout', () => { this.hover = undefined; this.drawRoom(); });
     this.input.on('pointerdown', (pointer: Phaser.Input.Pointer) => {
-      if (pointer.leftButtonDown()) act({ type: 'move', to: this.tileAt(pointer) });
+      if (!pointer.leftButtonDown() && !pointer.wasTouch) return;
+      const to = this.tileAt(pointer);
+      if (liveGame) {
+        heldDirections.clear();
+        const result = liveGame.walk(to);
+        element('feedback').textContent = result.ok ? '' : result.reason;
+      } else void act({ type: 'move', to });
     });
     room = this;
+    if (liveMode) {
+      liveGame = new LiveGame({
+        onChange: () => {
+          if (!liveGame) return;
+          world = liveGame.snapshot.world;
+          update();
+        },
+        onAction: reportAction,
+      });
+      world = liveGame.snapshot.world;
+      liveGame.setPaused(document.hidden);
+    }
     update();
+  }
+
+  update() {
+    if (!liveGame) return;
+    liveGame.frame();
+    const direction = [...heldDirections.values()].at(-1);
+    if (direction && !liveGame.playerMoving && !liveGame.snapshot.paused) {
+      const { x, y } = world.actors.player.position;
+      if (liveGame.canWalk({ x: x + direction[0], y: y + direction[1] })) move(...direction);
+    }
+    updateClock();
+    this.drawActors();
   }
 
   private tileAt(pointer: Phaser.Input.Pointer): Point {
@@ -178,16 +278,19 @@ class CafeScene extends Phaser.Scene {
     return { x: left + point.x * cell + cell / 2, y: top + point.y * cell + cell / 2 };
   }
 
-  private rect(x: number, y: number, w: number, h: number, color: number, alpha = 1) {
-    this.art.fillStyle(color, alpha).fillRect(x, y, w, h);
+  private rect(x: number, y: number, w: number, h: number, color: number, alpha = 1, art = this.art) {
+    art.fillStyle(color, alpha).fillRect(x, y, w, h);
   }
 
-  private textAt(text: string, x: number, y: number, color = '#f4ddbb', size = 13) {
-    const sign = this.add.text(x, y, text, {
+  private createLabel(text: string, color = '#f4ddbb', size = 13) {
+    return this.add.text(0, 0, text, {
       color, fontFamily: 'monospace', fontSize: size, fontStyle: 'bold',
       backgroundColor: '#252429', padding: { x: 5, y: 3 },
     }).setOrigin(.5);
-    this.signs.add(sign);
+  }
+
+  private textAt(text: string, x: number, y: number, color?: string, size?: number) {
+    this.signs.add(this.createLabel(text, color, size).setPosition(x, y));
   }
 
   private drawFurniture(point: Point, label: string, color: number) {
@@ -200,50 +303,58 @@ class CafeScene extends Phaser.Scene {
     this.textAt(label, x, y + 29);
   }
 
-  private drawObject(id: ObjectId, x: number, y: number) {
+  private drawObject(id: ObjectId, x: number, y: number, art = this.art) {
+    const rect = (x: number, y: number, w: number, h: number, color: number) => this.rect(x, y, w, h, color, 1, art);
     switch (id) {
       case 'mug1':
       case 'mug2': {
         const color = id === 'mug1' ? 0xf1d4a1 : 0x9bc49d;
-        this.rect(x - 7, y - 6, 13, 13, color);
-        this.rect(x + 5, y - 3, 5, 7, color);
-        this.rect(x + 6, y - 1, 2, 3, 0x514048);
-        this.rect(x - 5, y - 4, 9, 3, 0x684633);
+        rect(x - 7, y - 6, 13, 13, color);
+        rect(x + 5, y - 3, 5, 7, color);
+        rect(x + 6, y - 1, 2, 3, 0x514048);
+        rect(x - 5, y - 4, 9, 3, 0x684633);
         break;
       }
       case 'papers':
-        this.rect(x - 10, y - 5, 19, 12, 0x916d5e);
-        this.rect(x - 9, y - 8, 17, 12, world.objects.papers.wetness ? 0xa8c9d0 : 0xffedbc);
-        this.rect(x - 5, y - 5, 9, 1, 0x7f7772);
-        this.rect(x - 5, y - 2, 6, 1, 0x7f7772);
+        rect(x - 10, y - 5, 19, 12, 0x916d5e);
+        rect(x - 9, y - 8, 17, 12, world.objects.papers.wetness ? 0xa8c9d0 : 0xffedbc);
+        rect(x - 5, y - 5, 9, 1, 0x7f7772);
+        rect(x - 5, y - 2, 6, 1, 0x7f7772);
         break;
       case 'towel':
-        this.rect(x - 10, y - 6, 20, 12, 0xbe908e);
-        this.rect(x - 10, y - 3, 20, 2, 0xe2b7a5);
-        this.rect(x - 10, y + 2, 20, 2, 0xe2b7a5);
+        rect(x - 10, y - 6, 20, 12, 0xbe908e);
+        rect(x - 10, y - 3, 20, 2, 0xe2b7a5);
+        rect(x - 10, y + 2, 20, 2, 0xe2b7a5);
         break;
     }
   }
 
   private drawActor(actor: ActorId) {
-    const {x, y} = this.center(world.actors[actor].position);
+    const {x, y} = this.center(liveGame?.pose(actor) ?? world.actors[actor].position);
+    const rect = (x: number, y: number, w: number, h: number, color: number) => this.rect(x, y, w, h, color, 1, this.actorArt);
     const main = actor === 'player' ? 0xb0ddd7 : 0xf4b887;
     const trim = actor === 'player' ? 0x367a77 : 0x9f6048;
-    this.art.fillStyle(0x352936, .31).fillEllipse(x, y + 18, 44, 16);
-    this.rect(x - 11, y + 10, 9, 13, 0x34363d);
-    this.rect(x + 2, y + 10, 9, 13, 0x34363d);
-    this.rect(x - 15, y - 6, 30, 21, trim);
-    this.rect(x - 11, y - 4, 22, 17, main);
-    this.rect(x - 10, y - 22, 20, 17, 0x49343e);
-    this.rect(x - 8, y - 17, 16, 11, actor === 'player' ? 0xd2a177 : 0xe7aa81);
-    this.rect(x - 5, y - 12, 2, 2, 0x342b31);
-    this.rect(x + 3, y - 12, 2, 2, 0x342b31);
+    this.actorArt.fillStyle(0x352936, .31).fillEllipse(x, y + 18, 44, 16);
+    rect(x - 11, y + 10, 9, 13, 0x34363d);
+    rect(x + 2, y + 10, 9, 13, 0x34363d);
+    rect(x - 15, y - 6, 30, 21, trim);
+    rect(x - 11, y - 4, 22, 17, main);
+    rect(x - 10, y - 22, 20, 17, 0x49343e);
+    rect(x - 8, y - 17, 16, 11, actor === 'player' ? 0xd2a177 : 0xe7aa81);
+    rect(x - 5, y - 12, 2, 2, 0x342b31);
+    rect(x + 3, y - 12, 2, 2, 0x342b31);
     const held = (Object.keys(labels) as ObjectId[]).filter(id => {
       const item = world.objects[id].location;
       return 'heldBy' in item && item.heldBy === actor;
     });
-    held.forEach((id, index) => this.drawObject(id, x + (index ? 21 : -21), y + 4));
-    this.textAt(actor === 'player' ? 'You' : 'Mara', x, y + 32, actor === 'player' ? '#b0ddd7' : '#f4b887');
+    held.forEach((id, index) => this.drawObject(id, x + (index ? 21 : -21), y + 4, this.actorArt));
+    this.actorLabels[actor].setPosition(x, y + 32);
+  }
+
+  private drawActors() {
+    this.actorArt.clear();
+    this.drawActor('player');
+    this.drawActor('mara');
   }
 
   drawRoom() {
@@ -253,7 +364,7 @@ class CafeScene extends Phaser.Scene {
     this.rect(24, 23, 720, 530, 0x353448);
     this.rect(34, 33, 700, 510, 0x493845);
 
-    const moves = actionsFor(world, 'player').moves();
+    const moves = liveGame?.reachable() ?? actionsFor(world, 'player').moves().map(move => move.to);
     for (let y = 0; y < layout.height; y++) {
       for (let x = 0; x < layout.width; x++) {
         const bx = left + x * cell;
@@ -266,9 +377,11 @@ class CafeScene extends Phaser.Scene {
           this.rect(bx, py + 20, cell - 1, 1, 0x765043, .53);
         }
         this.rect(bx, by + 84, cell - 1, 2, 0x785342, .65);
-        const adjacent = moves.some(({ to }) => to.x === x && to.y === y);
+        const adjacent = moves.some(to => to.x === x && to.y === y);
         if (adjacent) {
-          this.art.lineStyle(1, 0xe4d4b8, .48).strokeRect(bx + 3, by + 3, cell - 7, cell - 7);
+          if (!liveMode || (this.hover?.x === x && this.hover?.y === y)) {
+            this.art.lineStyle(1, 0xe4d4b8, .48).strokeRect(bx + 3, by + 3, cell - 7, cell - 7);
+          }
           if (this.hover?.x === x && this.hover.y === y) this.rect(bx + 4, by + 4, cell - 9, cell - 9, 0xffe5ba, .22);
         }
       }
@@ -307,8 +420,7 @@ class CafeScene extends Phaser.Scene {
       const { x, y } = this.center(layout.surfaces[surface]);
       objects.forEach((id, index) => this.drawObject(id, x + (index % 2 ? 13 : -13), y - 15 + Math.floor(index / 2) * 15));
     }
-    this.drawActor('player');
-    this.drawActor('mara');
+    this.drawActors();
   }
 }
 
@@ -334,8 +446,29 @@ document.addEventListener('keydown', event => {
   const direction = keys[event.key.toLowerCase()];
   if (direction) {
     event.preventDefault();
-    move(...direction);
+    if (liveGame) {
+      heldDirections.set(event.key.toLowerCase(), direction);
+      if (liveGame.playerMoving) liveGame.interruptPlayerRoute();
+      else move(...direction);
+    } else move(...direction);
   }
+});
+document.addEventListener('keyup', event => heldDirections.delete(event.key.toLowerCase()));
+window.addEventListener('blur', () => heldDirections.clear());
+document.addEventListener('focusin', event => {
+  if (event.target instanceof HTMLInputElement) heldDirections.clear();
+});
+document.addEventListener('visibilitychange', () => {
+  heldDirections.clear();
+  liveGame?.setPaused(document.hidden);
+});
+window.addEventListener('pagehide', () => {
+  heldDirections.clear();
+  pending?.abort();
+  liveGame?.dispose();
+});
+window.addEventListener('pageshow', event => {
+  if (event.persisted) location.reload();
 });
 element<HTMLFormElement>('speak').addEventListener('submit', async event => {
   event.preventDefault();
@@ -343,24 +476,33 @@ element<HTMLFormElement>('speak').addEventListener('submit', async event => {
   const line = input.value.trim();
   if (line && await act({ type: 'speak', text: line })) input.value = '';
 });
-element('export-traces').addEventListener('click', () => {
-  const url = URL.createObjectURL(new Blob([traceLog.toJSON()], { type: 'application/json' }));
+function download(data: string, name: string) {
+  const url = URL.createObjectURL(new Blob([data], { type: 'application/json' }));
   const link = document.createElement('a');
   link.href = url;
-  link.download = 'closing-time-turn-traces.json';
+  link.download = name;
   link.click();
   window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+element('export-traces').addEventListener('click', () => {
+  download(traceLog.toJSON(), 'closing-time-turn-traces.json');
+});
+element('export-timeline').addEventListener('click', () => {
+  if (liveGame) download(liveGame.trace.toJSON(), 'closing-time-timeline.json');
 });
 element('reset').addEventListener('click', () => {
+  heldDirections.clear();
+  resetFeedback();
+  if (liveGame) {
+    liveGame.restart();
+    return;
+  }
   world = createWorld();
   pending?.abort();
   pending = undefined;
   recentTurns = [];
   sessionId = crypto.randomUUID();
   latestRationale = '';
-  activity = [];
-  element<HTMLInputElement>('say').value = '';
-  element('feedback').textContent = '';
   update();
 });
 update();

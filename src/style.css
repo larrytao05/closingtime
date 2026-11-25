@@ -13,6 +13,9 @@
 body { margin: 0; }
 .shell { width: min(1200px, 100%); margin: 0 auto; padding: 38px clamp(14px, 4vw, 44px); }
 .page-header { display: flex; justify-content: space-between; gap: 16px; align-items: center; margin-bottom: 26px; }
+.scene-controls { display: flex; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: 8px 14px; }
+.scene-controls a { color: var(--accent); font-size: 13px; }
+.scene-controls a:focus-visible { outline: 2px solid #b0ddd7; outline-offset: 2px; }
 h1 { margin: 0; font: 500 clamp(38px, 6vw, 64px)/1.06 Georgia, serif; letter-spacing: -.04em; }
 .page-header p { margin: 9px 0 0; color: var(--muted); }
 .game-layout { display: grid; grid-template-columns: minmax(0, 1fr) minmax(290px, 330px); gap: 18px; align-items: start; }
@@ -57,5 +60,5 @@ button[aria-disabled="true"], form button:disabled { opacity: .55; cursor: wait;
 }
 details { margin-top: 12px; font-size: 13px; }
 details summary { cursor: pointer; color: var(--accent); }
-#rationale, #trace-status { color: var(--muted); margin: 8px 0; overflow-wrap: anywhere; }
-#export-traces:disabled { opacity: .55; cursor: default; }
+#rationale, #trace-status, #timeline-status, #live-selected, #live-outcome { color: var(--muted); margin: 8px 0; overflow-wrap: anywhere; }
+#export-traces:disabled, #export-timeline:disabled { opacity: .55; cursor: default; }

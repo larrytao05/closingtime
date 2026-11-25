@@ -189,16 +189,17 @@ export function perform(world: World, actor: ActorId, action: Action): ActionRes
   }
 }
 
+export function papersExposed(world: World): boolean {
+  const { location } = world.objects.papers;
+  return world.windowOpen && 'surface' in location && location.surface === 'table';
+}
+
+export function wetPapers(world: World): World {
+  const papers = world.objects.papers;
+  return { ...world, objects: { ...world.objects, papers: { ...papers, wetness: papers.wetness + 1 } } };
+}
+
 export function advanceRain(world: World): World {
   const nextWorld = { ...world, turn: world.turn + 1 };
-  const { papers } = world.objects;
-
-  if (world.windowOpen && 'surface' in papers.location && papers.location.surface === 'table') {
-    nextWorld.objects = {
-      ...world.objects,
-      papers: { ...papers, wetness: papers.wetness + 1 },
-    };
-  }
-
-  return nextWorld;
+  return papersExposed(nextWorld) ? wetPapers(nextWorld) : nextWorld;
 }
