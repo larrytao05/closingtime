@@ -232,24 +232,33 @@ export function sourceEventStatus(sequence: number, snapshot: AuditSnapshot): 'r
 
 function validateDecision(entry: SimulationDecisionAuditEntry, runId: string): void {
   const request = entry.request;
-  if (!isRecord(request) || request.runId !== runId || typeof request.requestId !== 'string' || !request.requestId ||
+  if (!isRecord(request) || !exactKeys(request, ['runId', 'requestId', 'generation', 'actorId', 'observedRevision', 'observation', 'witnessedEvents', 'options', 'recall']) || request.runId !== runId || typeof request.requestId !== 'string' || !request.requestId ||
     !Number.isInteger(request.generation) || request.generation < 0 ||
     !['player', 'mara', 'riley', 'jo'].includes(request.actorId) ||
-    !isInt(request.observedRevision) || !isRecord(request.observation) || request.observation.actorId !== request.actorId ||
+    !isInt(request.observedRevision) || !isRecord(request.observation) || !exactKeys(request.observation, ['actorId', 'activeTimeMs', 'revision', 'selfPosition', 'visibleActors', 'visibleObjects', 'windowOpen', 'rainExposureMs']) || request.observation.actorId !== request.actorId ||
     !isInt(request.observation.activeTimeMs) || request.observation.revision !== request.observedRevision ||
     !isPoint(request.observation.selfPosition) || typeof request.observation.windowOpen !== 'boolean' ||
     !isInt(request.observation.rainExposureMs) || !Array.isArray(request.observation.visibleActors) ||
-    !Array.isArray(request.observation.visibleObjects) || !isRecord(request.recall) || request.recall.actorId !== request.actorId ||
-    !Array.isArray(request.recall.records) || !Array.isArray(request.recall.retrievedMemoryIds) ||
+    !Array.isArray(request.observation.visibleActors) || !request.observation.visibleActors.every(actor => isRecord(actor) && exactKeys(actor, ['actorId', 'position']) && isActor(actor.actorId) && isPoint(actor.position)) ||
+    !Array.isArray(request.observation.visibleObjects) || !request.observation.visibleObjects.every(object => isRecord(object) && exactKeys(object, ['objectId', 'location', 'wetness']) && isObjectId(object.objectId) && isObjectState({ location: object.location, wetness: object.wetness })) ||
+    !isRecord(request.recall) || !exactKeys(request.recall, ['actorId', 'records', 'retrievedMemoryIds']) || request.recall.actorId !== request.actorId ||
+    !Array.isArray(request.recall.records) || !request.recall.records.every(record => isMemoryRecord(record, request.actorId)) ||
+    !Array.isArray(request.recall.retrievedMemoryIds) || !request.recall.retrievedMemoryIds.every(id => typeof id === 'string') ||
     byteLength(request.recall) > SIMULATION_REQUEST_MAX_RECALL_BYTES ||
     !Array.isArray(request.witnessedEvents) || request.witnessedEvents.length > SIMULATION_REQUEST_MAX_WITNESSED_EVENTS ||
-    !request.witnessedEvents.every(event => isRecord(event) && event.runId === runId && isInt(event.sequence) &&
-      isInt(event.activeTimeMs) && isRecord(event.payload)) ||
+    !request.witnessedEvents.every(event => isRecord(event) && exactKeys(event, ['runId', 'sequence', 'activeTimeMs', 'payload']) && event.runId === runId && isInt(event.sequence) &&
+      isInt(event.activeTimeMs) && isRecord(event.payload) && validPayload(event.payload)) ||
     !Array.isArray(request.options) || request.options.length > SIMULATION_REQUEST_MAX_OPTIONS ||
-    !request.options.every(option => isRecord(option) && typeof option.actionId === 'string' && isRecord(option.action)) ||
+    !request.options.every(option => isRecord(option) && exactKeys(option, ['actionId', 'action']) && typeof option.actionId === 'string' && !!option.actionId && isSimulationAction(option.action)) ||
     !Number.isFinite(entry.startedAtActiveMs) || !Number.isFinite(entry.finishedAtActiveMs) ||
     entry.finishedAtActiveMs < entry.startedAtActiveMs ||
-    !['committed', 'stale', 'cancelled', 'failed'].includes(entry.outcome))
+    !['committed', 'stale', 'cancelled', 'failed'].includes(entry.outcome) ||
+    (entry.selectedAction !== undefined && !isSimulationAction(entry.selectedAction)) ||
+    (entry.memoryProposals !== undefined && (!Array.isArray(entry.memoryProposals) || entry.memoryProposals.length > 3 || !entry.memoryProposals.every(isMemoryProposal))) ||
+    (entry.rationale !== undefined && (typeof entry.rationale !== 'string' || entry.rationale.length > 1_000)) ||
+    (entry.modelResponseId !== undefined && typeof entry.modelResponseId !== 'string') ||
+    (entry.actionId !== undefined && typeof entry.actionId !== 'string') || (entry.reason !== undefined && typeof entry.reason !== 'string') ||
+    (entry.dispatchOutcome !== undefined && !isDispatchOutcome(entry.dispatchOutcome)))
     throw new Error('Decision audit entry is malformed.');
   if (entry.kind !== 'decision' || typeof entry.auditOrder !== 'number') throw new Error('Decision audit envelope is malformed.');
   if (entry.reply !== undefined && (typeof entry.reply !== 'string' || entry.reply.length > SIMULATION_REQUEST_MAX_SPEECH_CHARS))
@@ -271,11 +280,46 @@ function validateCommittedEvent(event: SimulationCommittedEvent, runId: string, 
 }
 
 function validatePayload(value: Record<string, unknown>): void {
-  if (typeof value.type !== 'string' || !['actor-joined', 'movement-tile-committed', 'speech', 'room-interaction', 'rain'].includes(value.type))
-    throw new Error('Audit event payload type is invalid.');
-  if ('actorId' in value && !['player', 'mara', 'riley', 'jo'].includes(String(value.actorId)))
-    throw new Error('Audit event actor is invalid.');
-  if (value.type === 'speech' && (typeof value.text !== 'string' || value.text.length > 160)) throw new Error('Audit speech is invalid.');
+  if (!validPayload(value)) throw new Error('Audit event payload is invalid.');
+}
+function validPayload(v: Record<string, unknown>): boolean {
+  switch (v.type) {
+    case 'actor-joined': return exactKeys(v, ['type', 'actorId', 'position']) && isActor(v.actorId) && isPoint(v.position);
+    case 'movement-tile-committed': return exactKeys(v, ['type', 'actorId', 'from', 'to']) && isActor(v.actorId) && isPoint(v.from) && isPoint(v.to);
+    case 'speech': return exactKeys(v, ['type', 'actorId', 'text'], ['recipient']) && isActor(v.actorId) && (v.recipient === undefined || isActor(v.recipient)) && typeof v.text === 'string' && v.text.length <= 160;
+    case 'room-interaction': return exactKeys(v, ['type', 'actorId', 'action']) && isActor(v.actorId) && isRecord(v.action) && isSimulationAction(v.action) && v.action.type !== 'walk' && v.action.type !== 'speak';
+    case 'rain': return exactKeys(v, ['type', 'exposed', 'elapsedMs', 'wetnessDelta']) && typeof v.exposed === 'boolean' && isInt(v.elapsedMs) && typeof v.wetnessDelta === 'number' && Number.isFinite(v.wetnessDelta) && v.wetnessDelta >= 0;
+    default: return false;
+  }
+}
+function isSimulationAction(v: unknown): boolean {
+  if (!isRecord(v)) return false;
+  switch (v.type) {
+    case 'walk': case 'move': return exactKeys(v, ['type', 'to']) && isPoint(v.to);
+    case 'pickUp': return exactKeys(v, ['type', 'objectId']) && isObjectId(v.objectId);
+    case 'putDown': return exactKeys(v, ['type', 'objectId', 'surfaceId']) && isObjectId(v.objectId) && (v.surfaceId === 'table' || v.surfaceId === 'counter');
+    case 'open': case 'close': case 'wait': return exactKeys(v, ['type']);
+    case 'speak': return exactKeys(v, ['type'], ['recipient']) && (v.recipient === undefined || isActor(v.recipient));
+    default: return false;
+  }
+}
+function isMemoryRecord(v: unknown, owner: string): boolean {
+  if (!isRecord(v) || v.owner !== owner || typeof v.id !== 'string' || !v.id || !isInt(v.activeTimeMs) || !Array.isArray(v.sourceEventIds) || !v.sourceEventIds.length || !v.sourceEventIds.every(id => typeof id === 'string')) return false;
+  if (v.kind === 'observation') return v.sourceEventIds.length === 1 && typeof v.text === 'string';
+  if (v.kind === 'attributed-speech') return v.sourceEventIds.length === 1 && isActor(v.speaker) && typeof v.exactLine === 'string';
+  return v.kind === 'commitment' && isActor(v.speaker) && typeof v.exactLine === 'string' && ['open', 'completed', 'withdrawn'].includes(String(v.status));
+}
+function isMemoryProposal(v: unknown): boolean {
+  if (!isRecord(v)) return false;
+  if (v.kind === 'open-commitment') return typeof v.sourceEventId === 'string' && typeof v.exactLine === 'string';
+  return v.kind === 'close-commitment' && typeof v.commitmentId === 'string' && typeof v.sourceEventId === 'string' && typeof v.exactLine === 'string' && (v.outcome === 'completed' || v.outcome === 'withdrawn');
+}
+function isDispatchOutcome(v: unknown): boolean {
+  if (!isRecord(v)) return false;
+  if (v.status === 'skipped') return ['paused', 'actor-absent', 'no-route'].includes(String(v.reason));
+  if (v.status === 'rejected') return typeof v.reason === 'string';
+  if (v.status === 'route-accepted') return typeof v.routeId === 'string';
+  return v.status === 'committed' && isRecord(v.event);
 }
 
 function assertCheckpoint(value: SimulationRoomCheckpoint, label: string): void {
@@ -289,11 +333,7 @@ function assertCheckpoint(value: SimulationRoomCheckpoint, label: string): void 
   if (Object.keys(value.objects).length !== objectIds.length || Object.keys(value.objects).some(id => !objectIds.includes(id)))
     throw new Error(`Audit ${label} has invalid room objects.`);
   for (const object of Object.values(value.objects)) {
-    if (!isRecord(object) || !Number.isFinite(object.wetness) || object.wetness < 0 || !isRecord(object.location))
-      throw new Error(`Audit ${label} has malformed object state.`);
-    const location = object.location;
-    if (!(('heldBy' in location && ['player', 'mara', 'riley', 'jo'].includes(String(location.heldBy))) ||
-      ('surface' in location && ['table', 'counter'].includes(String(location.surface)))))
+    if (!isObjectState(object))
       throw new Error(`Audit ${label} has malformed object state.`);
   }
 }
@@ -301,11 +341,29 @@ function assertCheckpoint(value: SimulationRoomCheckpoint, label: string): void 
 function isPoint(value: unknown): value is { x: number; y: number } {
   return isRecord(value) && isInt(value.x) && isInt(value.y);
 }
+function isActor(value: unknown): boolean { return ['player', 'mara', 'riley', 'jo'].includes(String(value)); }
+function isObjectId(value: unknown): boolean { return ['papers', 'mug1', 'mug2', 'towel'].includes(String(value)); }
+function exactKeys(value: unknown, required: string[], optional: string[] = []): boolean {
+  if (!isRecord(value)) return false;
+  const keys = Object.keys(value);
+  return required.every(key => key in value) && keys.every(key => required.includes(key) || optional.includes(key));
+}
+function isObjectState(value: unknown): boolean {
+  if (!isRecord(value) || !Number.isFinite(value.wetness) || value.wetness < 0 || !isRecord(value.location)) return false;
+  const l = value.location;
+  return (Object.keys(l).length === 1 && isActor(l.heldBy)) || (Object.keys(l).length === 1 && (l.surface === 'table' || l.surface === 'counter'));
+}
 function isInt(value: unknown): value is number { return Number.isSafeInteger(value) && (value as number) >= 0; }
 function isRecord(value: unknown): value is Record<string, any> { return typeof value === 'object' && value !== null && !Array.isArray(value); }
 function byteLength(value: unknown): number { return new TextEncoder().encode(JSON.stringify(value)).byteLength; }
 function sameNonClockState(a: SimulationRoomCheckpoint, b: SimulationRoomCheckpoint): boolean {
-  return a.revision === b.revision && a.windowOpen === b.windowOpen && JSON.stringify(a.actors) === JSON.stringify(b.actors) &&
-    JSON.stringify(a.objects) === JSON.stringify(b.objects);
+  return a.revision === b.revision && a.windowOpen === b.windowOpen && sameValue(a.actors, b.actors) && sameValue(a.objects, b.objects);
+}
+function sameValue(a: unknown, b: unknown): boolean {
+  if (a === b) return true;
+  if (Array.isArray(a) || Array.isArray(b)) return Array.isArray(a) && Array.isArray(b) && a.length === b.length && a.every((v, i) => sameValue(v, b[i]));
+  if (!isRecord(a) || !isRecord(b)) return false;
+  const ak = Object.keys(a).sort(); const bk = Object.keys(b).sort();
+  return ak.length === bk.length && ak.every((key, i) => key === bk[i] && sameValue(a[key], b[key]));
 }
 function clone<T>(value: T): T { return structuredClone(value); }

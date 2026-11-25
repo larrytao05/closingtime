@@ -38,6 +38,20 @@ test('replays retained committed state then applies exact exported clock metadat
   assert.deepEqual(audit.eventsFor('jo'), []);
 });
 
+test('replay treats checkpoint object key order as semantically irrelevant', () => {
+  const audit = new SimulationAudit();
+  audit.start('run-a', checkpoint());
+  const snapshot = audit.snapshot(checkpoint());
+  snapshot.finalCheckpoint.actors = { jo: { y: 3, x: 4 }, riley: { y: 3, x: 3 }, mara: { y: 3, x: 2 } };
+  snapshot.finalCheckpoint.objects = {
+    towel: { wetness: 0, location: { surface: 'counter' } },
+    mug2: { wetness: 0, location: { heldBy: 'mara' } },
+    mug1: { wetness: 0, location: { heldBy: 'mara' } },
+    papers: { wetness: 0, location: { surface: 'table' } },
+  };
+  assert.deepEqual(audit.replay(snapshot), { ...checkpoint(), actors: snapshot.finalCheckpoint.actors, objects: snapshot.finalCheckpoint.objects });
+});
+
 test('retains the exact settled nested decision request and filters entries by actor', () => {
   const audit = new SimulationAudit();
   audit.start('run-a', checkpoint());
@@ -68,6 +82,26 @@ test('restore validates imported JSON before replacing a usable trace', () => {
   assert.equal(audit.snapshot(checkpoint()).runId, 'safe');
   audit.importJSON(JSON.stringify(snapshot));
   assert.equal(audit.snapshot(checkpoint()).runId, 'safe');
+});
+
+test('import rejects malformed nested actions and witnessed room payloads', () => {
+  const audit = new SimulationAudit();
+  audit.start('run-a', checkpoint());
+  audit.recordDecision({
+    request: {
+      runId: 'run-a', requestId: 'req', generation: 0, actorId: 'mara', observedRevision: 0,
+      observation: { actorId: 'mara', activeTimeMs: 0, revision: 0, selfPosition: { x: 2, y: 3 }, visibleActors: [], visibleObjects: [], windowOpen: true, rainExposureMs: 0 },
+      witnessedEvents: [], options: [{ actionId: 'wait', action: { type: 'wait' } }],
+      recall: { actorId: 'mara', records: [], retrievedMemoryIds: [] },
+    }, outcome: 'failed', startedAtActiveMs: 0, finishedAtActiveMs: 0,
+  });
+  const snapshot = audit.snapshot(checkpoint());
+  const badAction = structuredClone(snapshot);
+  (badAction.entries[0] as any).request.options[0].action = { type: 'pickUp', objectId: 'unknown' };
+  assert.throws(() => validateAuditSnapshot(badAction), /Decision audit entry is malformed/);
+  const badPayload = structuredClone(snapshot);
+  (badPayload.entries[0] as any).request.witnessedEvents = [{ runId: 'run-a', sequence: 1, activeTimeMs: 0, payload: { type: 'movement-tile-committed', actorId: 'mara', from: {}, to: { x: 1, y: 2 } } }];
+  assert.throws(() => validateAuditSnapshot(badPayload), /Decision audit entry is malformed/);
 });
 
 test('rejects misordered sequence and checkpoint provenance', () => {
