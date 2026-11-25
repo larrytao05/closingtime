@@ -157,3 +157,13 @@ test('recall stays bounded after ingesting 1,000 seeded witnessed records', () =
   assert.ok(new TextEncoder().encode(JSON.stringify(recall)).byteLength <= 2048);
   assert.equal(recall.records.some(record => record.activeTimeMs < snapshot[0].activeTimeMs), false);
 });
+
+test('recall includes a Unicode record at its exact UTF-8 byte budget boundary', () => {
+  const memory = new SimulationMemory();
+  memory.ingest(speech(1, 'mara', 'Café ☕ — papers are ready.', ['mara']), 'mara');
+  const expected = { actorId: 'mara', records: memory.snapshot(), retrievedMemoryIds: ['speech:cafe-1:1:mara'] };
+  const exactBytes = new TextEncoder().encode(JSON.stringify(expected)).byteLength;
+
+  assert.equal(new TextEncoder().encode(JSON.stringify(memory.recall('mara', observation(), exactBytes))).byteLength, exactBytes);
+  assert.deepEqual(memory.recall('mara', observation(), exactBytes - 1).records, []);
+});
