@@ -10,6 +10,7 @@
   --accent: #f3c987;
 }
 * { box-sizing: border-box; }
+[hidden] { display: none !important; }
 body { margin: 0; }
 .shell { width: min(1200px, 100%); margin: 0 auto; padding: 38px clamp(14px, 4vw, 44px); }
 .page-header { display: flex; justify-content: space-between; gap: 16px; align-items: center; margin-bottom: 26px; }

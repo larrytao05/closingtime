@@ -1,7 +1,7 @@
 import { SimulationRuntime } from './runtime';
 import { SimulationAudit } from './audit';
 import type { SimulationActorId, SimulationAction, SimulationRoomCheckpoint } from './contracts';
-import type { Point } from '../world';
+import { layout, type Point } from '../world';
 
 const CELL = 86, LEFT = 40, TOP = 39, WIDTH = 768, HEIGHT = 576;
 const CAST: SimulationActorId[] = ['mara', 'riley', 'jo', 'player'];
@@ -31,30 +31,40 @@ export class SimulationView {
 
   async start(resume: boolean) {
     if (this.started) {
-      await this.runtime?.reset();
-      el('simulation-replay-section').hidden = true;
-      el('simulation-replay').textContent = '';
-      this.message('A new café scene is running.');
+      try {
+        await this.runtime?.reset();
+        el('simulation-replay-section').hidden = true;
+        el('simulation-replay').textContent = '';
+        this.message('A new café scene is running.');
+      } catch (error) { this.message(`Could not start a new scene: ${this.errorMessage(error)}`); }
       return;
     }
-    this.started = true;
-    el('simulation-start').hidden = true;
-    el('simulation-controls').hidden = false;
-    const query = new URLSearchParams(location.search);
-    const fixture = query.has('fixture');
-    this.runtime = resume ? await SimulationRuntime.resume(fixture ? { ambientIntervalMs: 4_000 } : {})
-      : await SimulationRuntime.start(fixture ? { ambientIntervalMs: 4_000 } : {});
-    this.runtime.subscribe(snapshot => { this.state = snapshot; this.render(); });
-    this.runtime.subscribeFrame(frame => { this.draw(frame.renderPositions); });
-    if (!resume) this.runtime.wake('mara', 'opening the café');
-    this.render();
+    try {
+      const query = new URLSearchParams(location.search);
+      const fixture = query.has('fixture');
+      this.runtime = resume ? await SimulationRuntime.resume(fixture ? { ambientIntervalMs: 4_000 } : {})
+        : await SimulationRuntime.start(fixture ? { ambientIntervalMs: 4_000 } : {});
+      this.runtime.subscribe(snapshot => { this.state = snapshot; this.render(); });
+      this.runtime.subscribeFrame(frame => { this.draw(frame.renderPositions); });
+      if (!resume) this.runtime.wake('mara', 'opening the café');
+      this.started = true;
+      el('simulation-start').hidden = true;
+      el('simulation-controls').hidden = false;
+      this.render();
+    } catch (error) {
+      this.runtime = undefined;
+      this.message(`Could not start the simulation: ${this.errorMessage(error)}`);
+    }
   }
 
   private bind() {
     el('simulation-new').addEventListener('click', async () => {
-      if (!this.runtime) await this.start(false); else await this.runtime.reset();
-      el('simulation-replay-section').hidden = true;
-      this.message('A new café scene is running.');
+      if (!this.runtime) { await this.start(false); return; }
+      try {
+        await this.runtime.reset();
+        el('simulation-replay-section').hidden = true;
+        this.message('A new café scene is running.');
+      } catch (error) { this.message(`Could not start a new scene: ${this.errorMessage(error)}`); }
     });
     el('simulation-resume').addEventListener('click', () => void this.start(true));
     el('simulation-pause').addEventListener('click', () => {
@@ -176,7 +186,8 @@ export class SimulationView {
     el('simulation-replay-section').hidden = false;
   }
 
-  private message(text: string) { el('simulation-feedback').textContent = text; }
+  private message(text: string) { el('simulation-feedback').textContent = text; el('simulation-start-feedback').textContent = text; }
+  private errorMessage(error: unknown) { return error instanceof Error ? error.message : 'Please try again.'; }
   private tileAt(event: MouseEvent): Point {
     const rect = this.canvas.getBoundingClientRect();
     return { x: Math.floor(((event.clientX - rect.left) * WIDTH / rect.width - LEFT) / CELL), y: Math.floor(((event.clientY - rect.top) * HEIGHT / rect.height - TOP) / CELL) };
@@ -191,11 +202,12 @@ export class SimulationView {
     for (let y = 0; y < 6; y++) for (let x = 0; x < 8; x++) { c.fillStyle = ['#9a6e57','#a1765a','#a77a61','#946754'][((x * 3 + y * 7) % 4)]; c.fillRect(LEFT + x * CELL, TOP + y * CELL, CELL - 1, CELL - 1); }
     const center = (p: Point) => ({x:LEFT+p.x*CELL+CELL/2,y:TOP+p.y*CELL+CELL/2});
     const drawFurniture = (p: Point, label: string) => { const q = center(p); c.fillStyle='#513641'; c.fillRect(q.x-30,q.y-27,60,41); c.fillStyle='#f6e9d4'; c.font='12px monospace'; c.fillText(label,q.x-24,q.y+39); };
-    drawFurniture({x:5,y:1},'Counter'); drawFurniture({x:2,y:3},'Table');
+    drawFurniture(layout.surfaces.counter,'Counter'); drawFurniture(layout.surfaces.table,'Table');
     const s = this.state?.checkpoint;
     if (s) {
-      const w = center({x:4,y:0}); c.fillStyle=s.windowOpen?'#87c2d1':'#667b94'; c.fillRect(w.x-27,43,54,27); c.fillStyle='#d6a17a'; c.fillRect(w.x-35,72,70,5); c.fillStyle='#f6e9d4'; c.fillText(s.windowOpen?'Open window':'Closed window',w.x-45,96);
-      for (const [id,obj] of Object.entries(s.objects)) { if ('surface' in obj.location) { const q=center(obj.location.surface==='table'?{x:2,y:3}:{x:5,y:1}); c.fillStyle=id==='papers'?(obj.wetness?'#a8c9d0':'#ffedbc'):id==='towel'?'#be908e':id==='mug1'?'#f1d4a1':'#9bc49d'; c.fillRect(q.x-7,q.y-10,15,12); } }
+      const w = center(layout.window); c.fillStyle=s.windowOpen?'#87c2d1':'#667b94'; c.fillRect(w.x-27,43,54,27); c.fillStyle='#d6a17a'; c.fillRect(w.x-35,72,70,5); c.fillStyle='#f6e9d4'; c.fillText(s.windowOpen?'Open window':'Closed window',w.x-45,96);
+      const surfaceOffsets: Record<string, number> = {};
+      for (const [id,obj] of Object.entries(s.objects)) { if ('surface' in obj.location) { const surface = obj.location.surface; const q=center(layout.surfaces[surface]); const index=surfaceOffsets[surface] ?? 0; surfaceOffsets[surface]=index+1; c.fillStyle=id==='papers'?(obj.wetness?'#a8c9d0':'#ffedbc'):id==='towel'?'#be908e':id==='mug1'?'#f1d4a1':'#9bc49d'; c.fillRect(q.x-17+(index%2)*20,q.y-10+Math.floor(index/2)*15,15,12); } }
     }
     const colors: Record<SimulationActorId,string>={mara:'#f4b887',riley:'#bad6a3',jo:'#c5b0df',player:'#b0ddd7'};
     if (positions) for (const id of CAST) { const p=positions[id]; if (!p) continue; const q=center(p); c.fillStyle=colors[id]; c.fillRect(q.x-14,q.y-17,28,35); c.fillStyle='#252429'; c.font='bold 12px monospace'; c.fillText(NAMES[id],q.x-20,q.y+33); }

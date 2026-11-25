@@ -109,8 +109,8 @@ export class SimulationRuntime {
     this.endpoint = options.endpoint ?? '/api/simulation';
     this.fetcher = options.fetch ?? globalThis.fetch.bind(globalThis);
     this.now = options.now ?? (() => performance.now());
-    this.setTimer = options.setTimer ?? setTimeout;
-    this.clearTimer = options.clearTimer ?? clearTimeout;
+    this.setTimer = options.setTimer ?? globalThis.setTimeout.bind(globalThis);
+    this.clearTimer = options.clearTimer ?? globalThis.clearTimeout.bind(globalThis);
     this.checkpointIntervalMs = options.checkpointIntervalMs ?? 15_000;
     this.frameIntervalMs = options.frameIntervalMs ?? 100;
     this.ambientIntervalMs = options.ambientIntervalMs ?? 35_000;
@@ -280,6 +280,7 @@ export class SimulationRuntime {
     this.activityItems = [];
     this.requestSequence = 1;
     this.scheduler = new SimulationScheduler({ now: this.now, deadlineMs: this.decisionDeadlineMs,
+      setTimer: this.setTimer, clearTimer: this.clearTimer,
       startDecision: (actorId, reason, signal) => this.decide(actorId, reason, signal) });
     this.resetClocks();
   }

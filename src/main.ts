@@ -451,7 +451,7 @@ const keys: Record<string, [number, number]> = {
   arrowleft: [-1, 0], a: [-1, 0],
   arrowright: [1, 0], d: [1, 0],
 };
-document.addEventListener('keydown', event => {
+if (!simulationMode) document.addEventListener('keydown', event => {
   if (event.target instanceof HTMLInputElement || event.ctrlKey || event.metaKey || event.altKey || event.repeat) return;
   const direction = keys[event.key.toLowerCase()];
   if (direction) {
@@ -463,8 +463,10 @@ document.addEventListener('keydown', event => {
     } else move(...direction);
   }
 });
-document.addEventListener('keyup', event => heldDirections.delete(event.key.toLowerCase()));
-window.addEventListener('blur', () => heldDirections.clear());
+if (!simulationMode) {
+  document.addEventListener('keyup', event => heldDirections.delete(event.key.toLowerCase()));
+  window.addEventListener('blur', () => heldDirections.clear());
+}
 document.addEventListener('focusin', event => {
   if (event.target instanceof HTMLInputElement) heldDirections.clear();
 });

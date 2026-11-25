@@ -37,7 +37,7 @@ export class SimulationScheduler {
     this.maxInFlight = options.maxInFlight ?? 2;
     this.deadlineMs = options.deadlineMs ?? 15_000; this.startsPerMinute = options.startsPerMinute ?? 12;
     this.replyWakeCap = options.replyWakeCap ?? 3;
-    this.setTimer = options.setTimer ?? setTimeout; this.clearTimerFn = options.clearTimer ?? clearTimeout;
+    this.setTimer = options.setTimer ?? globalThis.setTimeout.bind(globalThis); this.clearTimerFn = options.clearTimer ?? globalThis.clearTimeout.bind(globalThis);
   }
 
   wake(actorId: NpcId, reason: string): void {
