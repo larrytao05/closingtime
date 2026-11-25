@@ -19,6 +19,7 @@ export class SimulationAudit {
   private startingCheckpoint?: SimulationRoomCheckpoint;
   private startingCheckpointProvenance?: AuditSnapshot['startingCheckpointProvenance'];
   private entries: SimulationAuditEntry[] = [];
+  private entriesJsonBytes = 2; // JSON array brackets
   private prunedThroughSequence = 0;
   private lastSequence = 0;
   private nextAuditOrder = 0;
@@ -32,6 +33,7 @@ export class SimulationAudit {
       runId, throughSequence: 0, revision: checkpoint.revision, source: 'run-start',
     };
     this.entries = [];
+    this.entriesJsonBytes = 2;
     this.prunedThroughSequence = 0;
     this.lastSequence = 0;
     this.nextAuditOrder = 0;
@@ -40,9 +42,9 @@ export class SimulationAudit {
   recordEvent(event: SimulationCommittedEvent): void {
     this.assertStarted();
     validateCommittedEvent(event, this.runId!, this.lastSequence);
-    this.entries.push({ kind: 'committed-event', auditOrder: this.nextAuditOrder++, event: clone(event) });
+    const entry: SimulationAuditEntry = { kind: 'committed-event', auditOrder: this.nextAuditOrder++, event: clone(event) };
+    this.appendEntry(entry);
     this.lastSequence = event.sequence;
-    this.trimToBounds();
   }
 
   recordDecision(entry: Omit<SimulationDecisionAuditEntry, 'kind' | 'auditOrder'>): void {
@@ -56,8 +58,7 @@ export class SimulationAudit {
       ...clone(entry), kind: 'decision', auditOrder: this.nextAuditOrder++,
     };
     validateDecision(complete, this.runId!);
-    this.entries.push(complete);
-    this.trimToBounds();
+    this.appendEntry(complete);
   }
 
   snapshot(finalCheckpoint: SimulationRoomCheckpoint): AuditSnapshot {
@@ -94,6 +95,7 @@ export class SimulationAudit {
     this.startingCheckpoint = clone(validated.startingCheckpoint);
     this.startingCheckpointProvenance = clone(validated.startingCheckpointProvenance);
     this.entries = clone(validated.entries);
+    this.entriesJsonBytes = byteLength(this.entries);
     this.prunedThroughSequence = validated.prunedThroughSequence;
     this.lastSequence = validated.finalCheckpointProvenance.throughSequence;
     this.nextAuditOrder = validated.entries.length
@@ -138,9 +140,14 @@ export class SimulationAudit {
   }
 
   private trimToBounds(): void {
-    while (this.entries.length > SIMULATION_AUDIT_MAX_ENTRIES || byteLength(this.entries) > SIMULATION_AUDIT_MAX_BYTES) {
+    // Reserve space for the snapshot envelope and checkpoints. The array size is
+    // maintained incrementally so recording a long run stays linear overall.
+    while (this.entries.length > SIMULATION_AUDIT_MAX_ENTRIES ||
+      this.entriesJsonBytes > SIMULATION_AUDIT_MAX_BYTES - 4_096) {
       if (this.entries.length <= 1) throw new Error('A single audit entry exceeds the retention limit.');
+      const oldLength = this.entries.length;
       const removed = this.entries.shift()!;
+      this.entriesJsonBytes -= byteLength(removed) + (oldLength > 1 ? 1 : 2);
       if (removed.kind === 'committed-event') {
         this.startingCheckpoint = clone(removed.event.afterCheckpoint);
         this.startingCheckpointProvenance = {
@@ -150,6 +157,12 @@ export class SimulationAudit {
         this.prunedThroughSequence = removed.event.sequence;
       }
     }
+  }
+
+  private appendEntry(entry: SimulationAuditEntry): void {
+    this.entriesJsonBytes += byteLength(entry) + (this.entries.length ? 1 : 0);
+    this.entries.push(entry);
+    this.trimToBounds();
   }
 
   private assertStarted(): void {
