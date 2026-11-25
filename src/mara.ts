@@ -66,6 +66,21 @@ async function askGemini<T extends { availableActions: { id: string }[] }>(
   env: ModelEnvironment,
   signal: AbortSignal,
 ) {
+  const result = await generateGemini({ input: observation, prompt, schema: {
+    type: 'object', properties: {
+      actionId: { type: 'string', description: 'The ID of one available action.', enum: observation.availableActions.map(action => action.id) },
+      speech: { type: ['string', 'null'], description: 'A line of dialogue for speak. Otherwise null.' },
+      rationale: { type: 'string', description: 'One brief sentence explaining what you observed and why you chose this action.' },
+    }, required: ['actionId', 'speech', 'rationale'], additionalProperties: false,
+  }, env, signal });
+  return { selection: result.selection as { actionId?: unknown; speech?: unknown; rationale?: unknown }, model: result.model };
+}
+
+/** Shared Gemini transport for legacy and simulation decisions. */
+export async function generateGemini(args: {
+  input: unknown; prompt: string; schema: Record<string, unknown>; env: ModelEnvironment; signal: AbortSignal;
+}): Promise<{ selection: Record<string, unknown>; model: string }> {
+  const { input, prompt, schema, env, signal } = args;
   const requestedModel = env.GEMINI_MODEL || 'gemini-3.1-flash-lite';
   const timeout = AbortSignal.timeout(15000);
   let response: Response;
@@ -76,27 +91,11 @@ async function askGemini<T extends { availableActions: { id: string }[] }>(
       signal: AbortSignal.any([signal, timeout]),
       body: JSON.stringify({
         systemInstruction: { parts: [{ text: prompt }] },
-        contents: [{ role: 'user', parts: [{ text: JSON.stringify(observation) }] }],
+        contents: [{ role: 'user', parts: [{ text: JSON.stringify(input) }] }],
         generationConfig: {
           maxOutputTokens: 256,
           responseMimeType: 'application/json',
-          responseJsonSchema: {
-            type: 'object',
-            properties: {
-              actionId: {
-                type: 'string',
-                description: 'The ID of one available action.',
-                enum: observation.availableActions.map(action => action.id),
-              },
-              speech: { type: ['string', 'null'], description: 'A line of dialogue for speak. Otherwise null.' },
-              rationale: {
-                type: 'string',
-                description: 'One brief sentence explaining what you observed and why you chose this action.',
-              },
-            },
-            required: ['actionId', 'speech', 'rationale'],
-            additionalProperties: false,
-          },
+          responseJsonSchema: schema,
         },
       }),
     });
@@ -115,10 +114,10 @@ async function askGemini<T extends { availableActions: { id: string }[] }>(
     const data = await response.json();
     const parts: Array<{ text?: string; thought?: boolean }> = data.candidates?.[0]?.content?.parts ?? [];
     const output = parts.filter(part => !part.thought).map(part => part.text ?? '').join('');
-    const selection: { actionId?: unknown; speech?: unknown; rationale?: unknown } = JSON.parse(output);
-    if (!selection || typeof selection !== 'object') throw new Error('Missing selection');
+    const selection: unknown = JSON.parse(output);
+    if (!selection || typeof selection !== 'object' || Array.isArray(selection)) throw new Error('Missing selection');
     const model = typeof data.modelVersion === 'string' ? data.modelVersion : requestedModel;
-    return { selection, model };
+    return { selection: selection as Record<string, unknown>, model };
   } catch {
     throw new LiveMaraRequestError(timeout.aborted ? 'timeout' : 'invalid-response');
   }
