@@ -171,11 +171,7 @@ export interface SimulationDecisionReply {
 
 export interface SimulationDecisionAuditEntry {
   kind: 'decision';
-  runId: string;
   auditOrder: number;
-  actorId: SimulationActorId;
-  requestId: string;
-  generation: number;
   /** Exact actor-local request sent to inference, including witnessed events. */
   /** Full request is retained only when the decision reaches a terminal result. */
   request: SimulationDecisionRequest;
@@ -186,10 +182,6 @@ export interface SimulationDecisionAuditEntry {
   /** Present only when a route/action was actually selected for dispatch. */
   selectedAction?: SimulationAction;
   rationale?: string;
-  observedRevision: number;
-  observation: ActorLocalObservation;
-  recall: SimulationActorRecall;
-  options: SimulationOption[];
   outcome: 'committed' | 'stale' | 'cancelled' | 'failed';
   dispatchOutcome?: SimulationDispatchOutcome;
   reason?: string;
