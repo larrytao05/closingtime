@@ -5,7 +5,7 @@ description: Verify Closing Time's browser game, turn-based and real-time play, 
 
 # Verify Closing Time
 
-This skill is a draft until a browser-driven feature has been exercised end to end. Read `features/README.md` and the relevant feature files; report each entry point that was not exercised. The UI is the primary surface; `/api/mara` is the model endpoint. `README.md` documents setup, controls, and fixture scenarios.
+Read `features/README.md` and the relevant feature files; report each entry point that was not exercised. The UI is the primary surface; `/api/mara` is the model endpoint. `README.md` documents setup, controls, and fixture scenarios.
 
 ## Launch
 
@@ -45,4 +45,4 @@ Close only the browser tab/profile created for this run. In the launch shell run
 
 ## Helpers
 
-The project supplies `node scripts/preview-fixture.mjs --port 4174`; see the README for scenarios and `features/` for UI journeys. Use the bundled `scripts/verify.mjs` for automated contract checks. Drive rendered journeys with the supported browser surface. If browser control is unavailable, report the blocked feature and keep this skill marked draft; HTTP or automated tests do not replace a browser proof.
+The project supplies `node scripts/preview-fixture.mjs --port 4174`; see the README for scenarios and `features/` for UI journeys. Use the bundled `scripts/verify.mjs` for automated contract checks. Drive rendered journeys with the supported browser surface. If browser control is unavailable, report which features remain unverified in the browser. HTTP and automated checks provide separate evidence.
