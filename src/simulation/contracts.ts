@@ -148,6 +148,13 @@ export interface SimulationDecisionRequest {
   recall: SimulationActorRecall;
 }
 
+/** Shared request bounds. Owning modules validate before accepting or sending. */
+export const SIMULATION_REQUEST_MAX_WITNESSED_EVENTS = 32;
+export const SIMULATION_REQUEST_MAX_OPTIONS = 64;
+export const SIMULATION_REQUEST_MAX_RECALL_BYTES = 2 * 1024;
+export const SIMULATION_REQUEST_MAX_SPEECH_CHARS = 160;
+export const SIMULATION_REQUEST_MAX_RATIONALE_CHARS = 1_000;
+
 export interface SimulationDecisionReply {
   runId: string;
   requestId: string;
@@ -157,6 +164,8 @@ export interface SimulationDecisionReply {
   /** Required only when the selected option is speech; never embedded in it. */
   reply?: string;
   rationale: string;
+  /** Provider response identifier when available, retained for audit. */
+  modelResponseId?: string;
   memoryProposals?: BoundedMemoryProposals;
 }
 
@@ -167,13 +176,22 @@ export interface SimulationDecisionAuditEntry {
   actorId: SimulationActorId;
   requestId: string;
   generation: number;
+  /** Exact actor-local request sent to inference, including witnessed events. */
+  /** Full request is retained only when the decision reaches a terminal result. */
+  request: SimulationDecisionRequest;
+  modelResponseId?: string;
   actionId?: string;
+  reply?: string;
+  memoryProposals?: BoundedMemoryProposals;
+  /** Present only when a route/action was actually selected for dispatch. */
+  selectedAction?: SimulationAction;
   rationale?: string;
   observedRevision: number;
   observation: ActorLocalObservation;
   recall: SimulationActorRecall;
   options: SimulationOption[];
   outcome: 'committed' | 'stale' | 'cancelled' | 'failed';
+  dispatchOutcome?: SimulationDispatchOutcome;
   reason?: string;
   startedAtActiveMs: number;
   finishedAtActiveMs: number;
@@ -196,9 +214,21 @@ export interface AuditSnapshot {
   };
   firstRetainedSequence: number;
   entries: SimulationAuditEntry[];
+  /** Oldest source sequence retained; older memory/event references are pruned. */
+  prunedThroughSequence: number;
   finalCheckpoint: SimulationRoomCheckpoint;
   finalCheckpointProvenance: { runId: string; throughSequence: number; revision: number };
 }
+
+/** Bounded audit policy: retain at most 2,000 ordered entries and 2 MiB JSON. */
+export const SIMULATION_AUDIT_MAX_ENTRIES = 2_000;
+export const SIMULATION_AUDIT_MAX_BYTES = 2 * 1024 * 1024;
+
+export type SimulationDispatchOutcome =
+  | { status: 'skipped'; reason: 'paused' | 'actor-absent' | 'no-route' }
+  | { status: 'rejected'; reason: string }
+  | { status: 'route-accepted'; routeId: string }
+  | { status: 'committed'; event: SimulationCommittedEvent };
 
 export interface SimulationSaveEnvelope {
   schemaVersion: 3;
@@ -208,46 +238,21 @@ export interface SimulationSaveEnvelope {
   audit: AuditSnapshot;
   nextEventSequence: number;
   writerToken: string;
+  /** Durable claim generation is compared atomically on every write. */
+  writerGeneration: number;
 }
 
-/** Stable ports for the parallel room, scheduler, memory, save, and audit work. */
-export interface SimulationRoom {
-  checkpoint(): SimulationRoomCheckpoint;
-  observationFor(actorId: SimulationActorId): ActorLocalObservation;
-  optionsFor(actorId: SimulationActorId): SimulationOption[];
-  subscribe(listener: (event: SimulationCommittedEvent) => void): () => void;
-  dispatch(actorId: SimulationActorId, action: SimulationAction, reply?: string): Promise<SimulationCommittedEvent | null>;
-  joinPlayer(position?: Point): Promise<SimulationCommittedEvent | null>;
-  pause(): void;
+export interface SimulationSaveClaim {
+  runId: string;
+  writerToken: string;
+  generation: number;
 }
 
-export interface SimulationScheduler {
-  wake(actorId: SimulationActorId, reason: string): void;
-  pause(): void;
-  resume(): void;
-  cancelAll(reason: string): void;
-  dispose(): void;
-}
+export type SimulationSaveMutationResult =
+  | { status: 'saved'; generation: number }
+  | { status: 'ownership-lost'; currentGeneration: number }
+  | { status: 'missing' };
 
-export interface SimulationMemory {
-  ingest(event: SimulationCommittedEvent, forActor: SimulationActorId): void;
-  recall(actorId: SimulationActorId, observation: ActorLocalObservation, budgetBytes?: number): SimulationActorRecall;
-  applyProposals(actorId: SimulationActorId, proposals: SimulationMemoryProposal[], witnessedEvents: WitnessedObservationEvent[]): SimulationMemoryRecord[];
-  snapshot(): SimulationMemoryRecord[];
-  restore(records: SimulationMemoryRecord[]): void;
-}
-
-export interface SimulationSaveStore {
-  load(runId: string): Promise<SimulationSaveEnvelope | null>;
-  save(envelope: SimulationSaveEnvelope): Promise<void>;
-  clear(runId: string): Promise<void>;
-}
-
-export interface SimulationAudit {
-  start(runId: string, checkpoint: SimulationRoomCheckpoint): void;
-  recordEvent(event: SimulationCommittedEvent): void;
-  recordDecision(entry: Omit<SimulationDecisionAuditEntry, 'kind' | 'auditOrder'>): void;
-  snapshot(finalCheckpoint: SimulationRoomCheckpoint): AuditSnapshot;
-  replay(snapshot: AuditSnapshot): SimulationRoomCheckpoint;
-  eventsFor(actorId: SimulationActorId): SimulationAuditEntry[];
-}
+export type SimulationSaveClaimResult =
+  | { status: 'claimed'; claim: SimulationSaveClaim; envelope: SimulationSaveEnvelope | null }
+  | { status: 'ownership-lost'; currentGeneration: number };
