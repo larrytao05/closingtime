@@ -80,6 +80,22 @@ test('Jo receives no speech text outside hearing range even when visible to the 
   room.dispose();
 });
 
+test('witnessed tails stay bounded while subscriptions receive the full event stream', () => {
+  const room = new SimulationRoom();
+  const streamed: number[] = [];
+  room.subscribe(event => streamed.push(event.sequence));
+  for (let index = 0; index < 80; index += 1) {
+    assert.equal(room.dispatch('mara', { type: 'speak' }, `line ${index}`).status, 'committed');
+  }
+  const tail = room.witnessedEventsFor('mara');
+  assert.equal(tail.length, 32);
+  assert.equal(tail[0].sequence, 49);
+  assert.equal(tail[31].sequence, 80);
+  assert.equal(streamed.length, 80);
+  assert.equal(new Set(streamed).size, 80);
+  room.dispose();
+});
+
 test('checkpoints restore only committed tile positions and preserve clock and partial rain exposure', () => {
   const room = new SimulationRoom({ checkpoint: {
     ...checkpoint({ mara: { x: 2, y: 3 }, riley: { x: 3, y: 4 }, jo: { x: 4, y: 3 } }),

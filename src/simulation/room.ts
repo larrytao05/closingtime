@@ -52,7 +52,8 @@ export class SimulationRoom {
   private readonly session: RealtimeSession<SimulationActorId>;
   private readonly movement: MovementController<SimulationActorId>;
   private readonly listeners = new Set<(event: SimulationCommittedEvent) => void>();
-  private readonly committed: SimulationCommittedEvent[] = [];
+  private readonly witnessed = new Map<SimulationActorId, WitnessedObservationEvent[]>();
+  private eventCapture?: SimulationCommittedEvent[];
   private sequence: number;
   private paused = false;
   private readonly sightDistance: number;
@@ -163,12 +164,7 @@ export class SimulationRoom {
   }
 
   witnessedEventsFor(actorId: SimulationActorId): WitnessedObservationEvent[] {
-    return this.committed.filter(event => event.audience.includes(actorId)).slice(-32).map(event => ({
-      runId: event.runId,
-      sequence: event.sequence,
-      activeTimeMs: event.activeTimeMs,
-      payload: structuredClone(event.payload),
-    }));
+    return structuredClone(this.witnessed.get(actorId) ?? []);
   }
 
   dispatch(actorId: SimulationActorId, action: SimulationAction, reply?: string): SimulationDispatchOutcome {
@@ -189,11 +185,13 @@ export class SimulationRoom {
       ? { type: 'speak', text: reply ?? '' }
       : action as Exclude<Action, { type: 'move' } | { type: 'speak' }>;
     this.directedRecipient = action.type === 'speak' ? action.recipient : undefined;
-    const committedAt = this.committed.length;
-    const result = this.session.dispatch(actorId, converted);
-    this.directedRecipient = undefined;
+    const batch: SimulationCommittedEvent[] = [];
+    this.eventCapture = batch;
+    let result: ReturnType<typeof this.session.dispatch>;
+    try { result = this.session.dispatch(actorId, converted); }
+    finally { this.directedRecipient = undefined; this.eventCapture = undefined; }
     if (!result.ok) return { status: 'rejected', reason: result.reason };
-    const event = this.committed[committedAt];
+    const event = batch[0];
     return event ? { status: 'committed', event } : { status: 'rejected', reason: 'Action did not produce a committed event.' };
   }
 
@@ -213,9 +211,11 @@ export class SimulationRoom {
 
   advance(deltaMs: number): SimulationCommittedEvent[] {
     if (!Number.isFinite(deltaMs) || deltaMs < 0) throw new RangeError('Advance duration must be non-negative and finite.');
-    const start = this.committed.length;
-    this.session.advanceBy(deltaMs);
-    return this.committed.slice(start);
+    const batch: SimulationCommittedEvent[] = [];
+    this.eventCapture = batch;
+    try { this.session.advanceBy(deltaMs); }
+    finally { this.eventCapture = undefined; }
+    return batch;
   }
 
   pause(): SimulationRoomCheckpoint {
@@ -276,7 +276,19 @@ export class SimulationRoom {
       afterCheckpoint: checkpoint,
       afterCheckpointProvenance: { runId: this.runId, eventSequence: sequence, revision: checkpoint.revision },
     };
-    this.committed.push(event);
+    this.eventCapture?.push(event);
+    const witnessedEvent: WitnessedObservationEvent = {
+      runId: event.runId,
+      sequence: event.sequence,
+      activeTimeMs: event.activeTimeMs,
+      payload: structuredClone(event.payload),
+    };
+    for (const actorId of audience) {
+      const tail = this.witnessed.get(actorId) ?? [];
+      tail.push(witnessedEvent);
+      if (tail.length > 32) tail.shift();
+      this.witnessed.set(actorId, tail);
+    }
     for (const listener of this.listeners) {
       try { listener(event); } catch { console.error('Simulation room event listener failed.'); }
     }
