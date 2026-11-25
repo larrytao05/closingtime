@@ -27,13 +27,25 @@ test('strictly reads actor-local simulation requests and rejects cross-actor or 
   assert.equal(readSimulationDecisionRequest(badAction), undefined);
 });
 
+test('accepts finite fractional clock values while keeping revisions and event ids integral', () => {
+  const value = request() as ReturnType<typeof request>;
+  (value.observation as Record<string, unknown>).activeTimeMs = 4000.25;
+  (value.observation as Record<string, unknown>).rainExposureMs = 12.5;
+  (value.witnessedEvents[0] as Record<string, unknown>).activeTimeMs = 3900.75;
+  (value.witnessedEvents[0] as { payload: Record<string, unknown> }).payload = { type: 'rain', exposed: true, elapsedMs: 2.25, wetnessDelta: 1 };
+  (value.recall.records[0] as Record<string, unknown>).activeTimeMs = 3000.5;
+  assert.ok(readSimulationDecisionRequest(value));
+  (value.observation as Record<string, unknown>).revision = 7.5;
+  assert.equal(readSimulationDecisionRequest(value), undefined);
+});
+
 test('provider projection sent for Jo contains only witnessed local fields and validates selected option', async () => {
   const oldFetch = globalThis.fetch;
   let sent: Record<string, unknown> | undefined;
   globalThis.fetch = async (_input, init) => {
     const body = JSON.parse(String(init?.body));
     sent = JSON.parse(body.contents[0].parts[0].text);
-    return Response.json({ modelVersion: 'fixture-model', responseId: 'gemini-response-1', candidates: [{ content: { parts: [{ text: JSON.stringify({ actionId: 'speak-1', reply: 'I saw you move over.', rationale: 'Mara is nearby.', memoryProposals: [] }) }] } }] });
+    return Response.json({ modelVersion: 'fixture-model', responseId: 'gemini-response-1', candidates: [{ content: { parts: [{ text: JSON.stringify({ actionId: 'speak-1', reply: 'I saw you move over.', rationale: 'Mara is nearby.', memoryProposals: [{ kind: 'open-commitment', sourceEventId: 'evidence-1', exactLine: 'I will dry the mug.' }] }) }] } }] });
   };
   try {
     const parsed = readSimulationDecisionRequest(request());
@@ -46,10 +58,16 @@ test('provider projection sent for Jo contains only witnessed local fields and v
     assert.equal(JSON.stringify(sent).includes('afterCheckpoint'), false);
     assert.equal((sent!.recall as { records: { sourceEventIds: string[] }[] }).records[0].sourceEventIds[0], 'run-1:2');
     assert.equal((sent!.recall as { actorId: string }).actorId, 'jo');
+    const event = (sent!.witnessedEvents as { evidenceId: string; runId?: string }[])[0];
+    assert.equal(event.evidenceId, 'evidence-1');
+    assert.equal('runId' in event, false);
+    assert.equal(reply.memoryProposals?.[0]?.sourceEventId, 'run-1:3');
     globalThis.fetch = async () => Response.json({ modelVersion: 'fixture-model-without-response-id', candidates: [{ content: { parts: [{ text: JSON.stringify({ actionId: 'walk-1', reply: null, rationale: 'The tile is clear.', memoryProposals: [] }) }] } }] });
     const noIdReply = await chooseSimulationDecision(parsed, { GEMINI_API_KEY: 'fixture-only' }, new AbortController().signal);
     assert.equal('modelResponseId' in noIdReply, false);
     globalThis.fetch = async () => Response.json({ candidates: [{ content: { parts: [{ text: JSON.stringify({ actionId: 'other', reply: null, rationale: 'bad', memoryProposals: [] }) }] } }] });
+    await assert.rejects(() => chooseSimulationDecision(parsed, { GEMINI_API_KEY: 'fixture-only' }, new AbortController().signal), /invalid-response/);
+    globalThis.fetch = async () => Response.json({ candidates: [{ content: { parts: [{ text: JSON.stringify({ actionId: 'speak-1', reply: null, rationale: 'No words.', memoryProposals: [] }) }] } }] });
     await assert.rejects(() => chooseSimulationDecision(parsed, { GEMINI_API_KEY: 'fixture-only' }, new AbortController().signal), /invalid-response/);
   } finally { globalThis.fetch = oldFetch; }
 });
