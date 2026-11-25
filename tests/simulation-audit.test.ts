@@ -38,6 +38,46 @@ test('replays retained committed state then applies exact exported clock metadat
   assert.deepEqual(audit.eventsFor('jo'), []);
 });
 
+test('accepts fractional active clock and exposure values throughout audit records', () => {
+  const audit = new SimulationAudit();
+  const start = checkpoint(0.125);
+  start.rainExposureMs = 0.0625;
+  audit.start('fractional-run', start);
+
+  const committed = checkpoint(0.75, 1);
+  committed.rainExposureMs = 0.375;
+  const rainEvent = event('fractional-run', 1, committed);
+  rainEvent.payload = { type: 'rain', exposed: true, elapsedMs: 0.3125, wetnessDelta: 0.125 };
+  audit.recordEvent(rainEvent);
+  audit.recordDecision({
+    request: {
+      runId: 'fractional-run', requestId: 'fractional-request', generation: 1, actorId: 'mara', observedRevision: 1,
+      observation: {
+        actorId: 'mara', activeTimeMs: 0.6875, revision: 1, selfPosition: { x: 2, y: 3 },
+        visibleActors: [], visibleObjects: [], windowOpen: true, rainExposureMs: 0.34375,
+      },
+      witnessedEvents: [{ runId: 'fractional-run', sequence: 1, activeTimeMs: 0.75,
+        payload: { type: 'rain', exposed: true, elapsedMs: 0.3125, wetnessDelta: 0.125 } }],
+      options: [{ actionId: 'wait', action: { type: 'wait' } }],
+      recall: {
+        actorId: 'mara',
+        records: [{ id: 'memory-1', kind: 'observation', owner: 'mara', sourceEventIds: ['event-1'],
+          text: 'The rain started.', activeTimeMs: 0.5 }],
+        retrievedMemoryIds: ['memory-1'],
+      },
+    },
+    outcome: 'failed', reason: 'fixture', startedAtActiveMs: 0.78125, finishedAtActiveMs: 0.8125,
+  });
+
+  const final = { ...committed, activeTimeMs: 0.875, rainExposureMs: 0.4375 };
+  const snapshot = audit.snapshot(final);
+  assert.equal(validateAuditSnapshot(snapshot).entries.length, 2);
+  assert.deepEqual(audit.replay(snapshot), final);
+  const restored = new SimulationAudit();
+  restored.importJSON(JSON.stringify(snapshot));
+  assert.deepEqual(restored.replay(snapshot), final);
+});
+
 test('replay treats checkpoint object key order as semantically irrelevant', () => {
   const audit = new SimulationAudit();
   audit.start('run-a', checkpoint());
