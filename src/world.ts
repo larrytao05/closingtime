@@ -1,4 +1,5 @@
 export type ActorId = 'player' | 'mara';
+export type WorldActorId = ActorId | 'riley' | 'jo';
 export type ObjectId = 'papers' | 'mug1' | 'mug2' | 'towel';
 export type SurfaceId = 'table' | 'counter';
 
@@ -16,20 +17,22 @@ export type Action =
   | { type: 'speak'; text: string }
   | { type: 'wait' };
 
-interface RoomObject {
-  location: { heldBy: ActorId } | { surface: SurfaceId };
+interface RoomObject<A extends WorldActorId = ActorId> {
+  location: { heldBy: A } | { surface: SurfaceId };
   wetness: number;
 }
 
-export interface World {
-  actors: Record<ActorId, { position: Point }>;
-  objects: Record<ObjectId, RoomObject>;
+type ActorPositions<A extends WorldActorId> = Record<ActorId, { position: Point }> & Partial<Record<A, { position: Point }>>;
+
+export interface World<A extends WorldActorId = ActorId> {
+  actors: ActorPositions<A>;
+  objects: Record<ObjectId, RoomObject<A>>;
   windowOpen: boolean;
   turn: number;
-  dialogue: Array<{ actor: ActorId; text: string }>;
+  dialogue: Array<{ actor: A; text: string }>;
 }
 
-export type ActionResult = { ok: true; world: World } | { ok: false; reason: string };
+export type ActionResult<A extends WorldActorId = ActorId> = { ok: true; world: World<A> } | { ok: false; reason: string };
 
 export const layout = {
   width: 8,
@@ -57,14 +60,14 @@ for (const objectId of objectIds) {
 }
 interactions.push({ type: 'wait' });
 
-export function actionsFor(world: World, actor: ActorId) {
+export function actionsFor<A extends WorldActorId>(world: World<A>, actor: A) {
   const execute = (action: Action) => perform(world, actor, action);
   const allows = (action: Action) => execute(action).ok;
   return {
     execute,
     allows,
     moves(): Move[] {
-      const { x, y } = world.actors[actor].position;
+      const { x, y } = world.actors[actor]!.position;
       return directions
         .map(({ x: dx, y: dy }): Move => ({ type: 'move', to: { x: x + dx, y: y + dy } }))
         .filter(allows);
@@ -99,33 +102,37 @@ export function isWithinReach(position: Point, target: Point): boolean {
   return distance(position, target) <= 1;
 }
 
-export function canStand(world: World, actor: ActorId, point: Point): boolean {
+export function canStand<A extends WorldActorId>(world: World<A>, actor: A, point: Point): boolean {
   if (!Number.isInteger(point.x) || !Number.isInteger(point.y)) return false;
   if (point.x < 0 || point.x >= layout.width || point.y < 0 || point.y >= layout.height) {
     return false;
   }
 
-  const otherActor = actor === 'player' ? 'mara' : 'player';
-  const blocked = [layout.window, ...Object.values(layout.surfaces), world.actors[otherActor].position];
-  return blocked.every(obstacle => distance(point, obstacle) > 0);
+  const occupied = Object.entries(world.actors)
+    .filter(([id, position]) => id !== actor && position !== undefined)
+    .map(([, position]) => position!.position);
+  return [layout.window, ...Object.values(layout.surfaces), ...occupied]
+    .every(obstacle => distance(point, obstacle) > 0);
 }
 
-export function heldItems(world: World, actor: ActorId): ObjectId[] {
+export function heldItems<A extends WorldActorId>(world: World<A>, actor: A): ObjectId[] {
   return objectIds.filter(id => {
     const { location } = world.objects[id];
     return 'heldBy' in location && location.heldBy === actor;
   });
 }
 
-export function perform(world: World, actor: ActorId, action: Action): ActionResult {
-  const { position } = world.actors[actor];
+export function perform<A extends WorldActorId>(world: World<A>, actor: A, action: Action): ActionResult<A> {
+  const actorState = world.actors[actor];
+  if (!actorState) return { ok: false, reason: 'That actor is not in the room.' };
+  const { position } = actorState;
 
   switch (action.type) {
     case 'move': {
       if (distance(position, action.to) !== 1 || !canStand(world, actor, action.to)) {
         return { ok: false, reason: 'Choose an open tile one step away.' };
       }
-      const actors = { ...world.actors, [actor]: { position: { ...action.to } } };
+      const actors = { ...world.actors, [actor]: { position: { ...action.to } } } as World<A>['actors'];
       return { ok: true, world: { ...world, actors } };
     }
 
@@ -189,17 +196,17 @@ export function perform(world: World, actor: ActorId, action: Action): ActionRes
   }
 }
 
-export function papersExposed(world: World): boolean {
+export function papersExposed<A extends WorldActorId>(world: World<A>): boolean {
   const { location } = world.objects.papers;
   return world.windowOpen && 'surface' in location && location.surface === 'table';
 }
 
-export function wetPapers(world: World): World {
+export function wetPapers<A extends WorldActorId>(world: World<A>): World<A> {
   const papers = world.objects.papers;
   return { ...world, objects: { ...world.objects, papers: { ...papers, wetness: papers.wetness + 1 } } };
 }
 
-export function advanceRain(world: World): World {
+export function advanceRain<A extends WorldActorId>(world: World<A>): World<A> {
   const nextWorld = { ...world, turn: world.turn + 1 };
   return papersExposed(nextWorld) ? wetPapers(nextWorld) : nextWorld;
 }
