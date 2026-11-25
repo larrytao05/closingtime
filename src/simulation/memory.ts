@@ -89,11 +89,20 @@ export class SimulationMemory {
     const nonCommitments = scored.map(item => item.record);
     const selected: SimulationMemoryRecord[] = [];
     const ids: string[] = [];
+    // Account for the exact JSON envelope and each array entry once. The two
+    // arrays grow in lockstep, so this is byte-for-byte equivalent to
+    // stringifying the whole recall while avoiding repeated work on prefixes.
+    let selectedBytes = encoder.encode(`{"actorId":${JSON.stringify(actorId)},"records":[],"retrievedMemoryIds":[]}`).byteLength;
     const append = (record: SimulationMemoryRecord) => {
       if (ids.includes(record.id)) return;
-      const next = [...selected, record];
-      const recall = { actorId, records: next, retrievedMemoryIds: next.map(item => item.id) };
-      if (encoder.encode(JSON.stringify(recall)).byteLength <= limit) { selected.push(record); ids.push(record.id); }
+      const recordBytes = encoder.encode(JSON.stringify(record)).byteLength;
+      const idBytes = encoder.encode(JSON.stringify(record.id)).byteLength;
+      const delta = recordBytes + idBytes + (selected.length === 0 ? 0 : 2);
+      if (selectedBytes + delta <= limit) {
+        selected.push(record);
+        ids.push(record.id);
+        selectedBytes += delta;
+      }
     };
     // Reserve space for current commitments before ordinary history.
     for (const record of activeCommitments.sort((a, b) => b.activeTimeMs - a.activeTimeMs)) append(record);
