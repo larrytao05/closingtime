@@ -111,8 +111,8 @@ export class SimulationMemory {
         if (record.kind === 'commitment' && record.status !== 'open') {
           const index = this.records.findIndex(item => item.id === record.id);
           if (index >= 0) this.records[index] = structuredClone(record); else this.add(record);
-        } else this.add(record);
-        created.push(record);
+          created.push(record);
+        } else if (this.add(record)) created.push(record);
       }
     }
     return created;
@@ -158,10 +158,17 @@ export class SimulationMemory {
     return score;
   }
 
-  private add(record: SimulationMemoryRecord): void {
-    if (this.records.some(item => item.id === record.id)) return;
+  private add(record: SimulationMemoryRecord): boolean {
+    if (this.records.some(item => item.id === record.id)) return false;
+    if (this.records.length >= MAX_RECORDS) {
+      // Open commitments survive ordinary churn. If the bound is entirely
+      // occupied by open commitments, reject the incoming record explicitly.
+      const evictIndex = this.records.findIndex(item => item.kind !== 'commitment' || item.status !== 'open');
+      if (evictIndex < 0) return false;
+      this.records.splice(evictIndex, 1);
+    }
     this.records.push(structuredClone(record));
-    if (this.records.length > MAX_RECORDS) this.records.splice(0, this.records.length - MAX_RECORDS);
+    return true;
   }
 }
 

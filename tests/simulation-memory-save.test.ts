@@ -27,7 +27,7 @@ test('memory is actor-scoped, only witnessed events are ingested, and witnessed 
   assert.deepEqual(memory.recall('jo', observation('jo')).records, []);
 });
 
-test('promise survives dialogue churn and fabricated, unrelated, and other-speaker proposals are rejected', () => {
+test('promise survives more than 512 records of churn and can still be closed', () => {
   const memory = new SimulationMemory();
   const promise = speech(1, 'mara', 'I promise I will bring the papers.', ['mara', 'riley']);
   const unrelated = speech(2, 'mara', 'The rain is loud in here.', ['mara', 'riley']);
@@ -39,11 +39,32 @@ test('promise survives dialogue churn and fabricated, unrelated, and other-speak
   assert.equal(memory.applyProposals('mara', [{ ...open, sourceEventId: 'cafe-1:3', exactLine: witnessedOther.payload.text }], witnesses).length, 0);
   assert.equal(memory.applyProposals('mara', [open], witnesses).length, 1);
   assert.equal(memory.applyProposals('mara', [open], witnesses).length, 0);
-  for (let i = 4; i <= 80; i++) memory.ingest(speech(i, 'riley', `Dialogue turn ${i}.`, ['mara', 'riley']), 'mara');
+  for (let i = 4; i <= 600; i++) memory.ingest(speech(i, 'riley', `Dialogue turn ${i}.`, ['mara', 'riley']), 'mara');
+  assert.equal(memory.snapshot().length, 512);
   const recalled = memory.recall('mara', observation());
   assert.ok(recalled.records.some(r => r.kind === 'commitment' && r.exactLine === promise.payload.text && r.status === 'open'));
   assert.deepEqual(recalled.retrievedMemoryIds, recalled.records.map(r => r.id));
   assert.ok(new TextEncoder().encode(JSON.stringify(recalled)).byteLength <= 2048);
+  const completion = speech(601, 'mara', 'Done, I brought the papers.', ['mara', 'riley']);
+  const completionWitness = [{ runId: completion.runId, sequence: completion.sequence, activeTimeMs: completion.activeTimeMs, payload: completion.payload }];
+  assert.equal(memory.applyProposals('mara', [{ kind: 'close-commitment', commitmentId: `commitment:cafe-1:1:mara`, sourceEventId: 'cafe-1:601', exactLine: completion.payload.text, outcome: 'completed' }], completionWitness).length, 1);
+  assert.ok(memory.snapshot().some(r => r.kind === 'commitment' && r.status === 'completed'));
+});
+
+test('memory rejects incoming records when all 512 retained records are open commitments', () => {
+  const memory = new SimulationMemory();
+  memory.restore(Array.from({ length: 512 }, (_, index): SimulationMemoryRecord => ({
+    id: `commitment:seed:${index}:mara`, kind: 'commitment', owner: 'mara', speaker: 'mara',
+    sourceEventIds: [`seed:${index}`], exactLine: 'I promise I will bring the papers.', status: 'open', activeTimeMs: index,
+  })));
+  const ordinary = speech(513, 'riley', 'A later witnessed dialogue turn.', ['mara', 'riley']);
+  memory.ingest(ordinary, 'mara');
+  assert.equal(memory.snapshot().length, 512);
+  assert.equal(memory.snapshot().some(record => record.id === 'speech:cafe-1:513:riley'), false);
+  const proposedOpen = speech(514, 'mara', 'I promise I will bring the mug.', ['mara']);
+  const witnessed = [{ runId: proposedOpen.runId, sequence: proposedOpen.sequence, activeTimeMs: proposedOpen.activeTimeMs, payload: proposedOpen.payload }];
+  assert.deepEqual(memory.applyProposals('mara', [{ kind: 'open-commitment', sourceEventId: 'cafe-1:514', exactLine: proposedOpen.payload.text }], witnessed), []);
+  assert.equal(memory.snapshot().length, 512);
 });
 
 test('commitment closure cites later explicit same-speaker line; restore and dedupe preserve actor records', () => {
