@@ -162,3 +162,97 @@ test('pause checkpoint resumes sourceable memory and a replayable audit', async 
   assert.deepEqual(resumed.replay(JSON.parse(resumed.exportAudit())), resumed.snapshot().checkpoint);
   await resumed.dispose();
 });
+
+test('mid-frame dispatch advances simulation clock through a single clock source without double counting', async () => {
+  let currentTime = 0;
+  let nextTimerId = 0;
+  const timers = new Map<number, { dueAt: number; callback: () => void }>();
+
+  const fakeSetTimer = ((callback: TimerHandler, delay = 0) => {
+    const id = ++nextTimerId;
+    timers.set(id, { dueAt: currentTime + Number(delay), callback: callback as () => void });
+    return id;
+  }) as typeof setTimeout;
+
+  const fakeClearTimer = ((id: number) => {
+    timers.delete(id);
+  }) as typeof clearTimeout;
+
+  const advanceTimeTo = async (targetTime: number) => {
+    currentTime = targetTime;
+    while (true) {
+      let earliestId: number | null = null;
+      let earliestDue = Infinity;
+      for (const [id, timer] of timers) {
+        if (timer.dueAt <= currentTime && timer.dueAt < earliestDue) {
+          earliestDue = timer.dueAt;
+          earliestId = id;
+        }
+      }
+      if (earliestId === null) break;
+      const timer = timers.get(earliestId)!;
+      timers.delete(earliestId);
+      timer.callback();
+      await tick();
+    }
+  };
+
+  const store = new SimulationSaveStore(new MemoryStorage());
+  const fetcher: typeof fetch = async () => { throw new Error('not expected'); };
+
+  const runtime = await SimulationRuntime.start({
+    saveStore: store,
+    fetch: fetcher,
+    now: () => currentTime,
+    setTimer: fakeSetTimer,
+    clearTimer: fakeClearTimer,
+    frameIntervalMs: 100,
+    checkpointIntervalMs: 10_000,
+    ambientIntervalMs: 10_000,
+  });
+
+  const frameTimes: number[] = [];
+  runtime.subscribeFrame(frame => {
+    frameTimes.push(frame.activeTimeMs);
+  });
+
+  assert.equal(runtime.snapshot().checkpoint.activeTimeMs, 0);
+
+  // Dispatch mid-frame action at 50 ms
+  currentTime = 50;
+  const outcome = runtime.action('mara', { type: 'wait' });
+  assert.equal(outcome.status, 'committed');
+  assert.equal(runtime.snapshot().checkpoint.activeTimeMs, 50);
+
+  // Advance to first frame boundary at 100 ms
+  await advanceTimeTo(100);
+  assert.equal(runtime.snapshot().checkpoint.activeTimeMs, 100);
+
+  // Advance to second frame boundary at 200 ms without mid-frame action
+  await advanceTimeTo(200);
+  assert.equal(runtime.snapshot().checkpoint.activeTimeMs, 200);
+
+  // Dispatch another mid-frame action at 250 ms
+  currentTime = 250;
+  const outcome2 = runtime.action('riley', { type: 'wait' });
+  assert.equal(outcome2.status, 'committed');
+  assert.equal(runtime.snapshot().checkpoint.activeTimeMs, 250);
+
+  // Advance to third frame boundary at 300 ms
+  await advanceTimeTo(300);
+  assert.equal(runtime.snapshot().checkpoint.activeTimeMs, 300);
+
+  // Verify pause and resume behavior preserves single-clock advance
+  currentTime = 340;
+  await runtime.pause();
+  assert.equal(runtime.snapshot().checkpoint.activeTimeMs, 340);
+
+  currentTime = 10_340;
+  runtime.resumeRun();
+  assert.equal(runtime.snapshot().checkpoint.activeTimeMs, 340);
+
+  await advanceTimeTo(10_440);
+  assert.equal(runtime.snapshot().checkpoint.activeTimeMs, 440);
+
+  await runtime.dispose();
+});

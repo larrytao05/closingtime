@@ -93,7 +93,6 @@ export class SimulationRuntime {
   private paused = false;
   private resetting = false;
   private disposed = false;
-  private lastFrameAt = 0;
   private lastAmbientAt = 0;
   private frameTimer?: ReturnType<typeof setTimeout>;
   private checkpointTimer?: ReturnType<typeof setTimeout>;
@@ -429,7 +428,6 @@ export class SimulationRuntime {
 
   private beginLoops(): void {
     if (this.paused || this.disposed) return;
-    this.lastFrameAt = this.now();
     this.lastAmbientAt = this.room.checkpoint().activeTimeMs;
     this.frameLoop();
     this.scheduleCheckpoint();
@@ -437,9 +435,7 @@ export class SimulationRuntime {
   private frameLoop(): void {
     if (this.paused || this.disposed) return;
     const now = this.now();
-    const delta = Math.max(0, now - this.lastFrameAt);
-    this.lastFrameAt = now;
-    this.room.advance(delta);
+    this.room.advanceTo(now);
     const activeTimeMs = this.room.checkpoint().activeTimeMs;
     if (activeTimeMs - this.lastAmbientAt >= this.ambientIntervalMs) {
       const actor = NPCS[Math.floor(Math.random() * NPCS.length)];
@@ -456,7 +452,7 @@ export class SimulationRuntime {
       this.scheduleCheckpoint();
     }, this.checkpointIntervalMs);
   }
-  private resetClocks(): void { this.lastFrameAt = this.now(); this.lastAmbientAt = this.room.checkpoint().activeTimeMs; }
+  private resetClocks(): void { this.lastAmbientAt = this.room.checkpoint().activeTimeMs; }
   private stopLoops(): void {
     for (const timer of [this.frameTimer, this.checkpointTimer]) if (timer) this.clearTimer(timer);
     this.frameTimer = this.checkpointTimer = undefined;

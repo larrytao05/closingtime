@@ -60,15 +60,17 @@ export class SimulationRoom {
   private readonly hearingDistance: number;
   private directedRecipient?: SimulationActorId;
   private renderCache?: Partial<Record<SimulationActorId, Point>>;
+  private readonly now: () => number;
 
   constructor(options: SimulationRoomOptions = {}) {
     this.runId = options.runId ?? 'simulation-run';
     this.sequence = options.nextEventSequence ?? 1;
     this.sightDistance = options.sightDistance ?? 6;
     this.hearingDistance = options.hearingDistance ?? 5;
+    this.now = options.now ?? (() => performance.now());
     const initial = options.checkpoint ? worldFromCheckpoint(options.checkpoint) : initialWorld();
     this.session = new RealtimeSession<SimulationActorId>({
-      now: options.now ?? (() => performance.now()),
+      now: this.now,
       initialWorld: initial,
       wetnessIntervalMs: 4_000,
       onEvent: event => this.onSessionEvent(event),
@@ -214,6 +216,14 @@ export class SimulationRoom {
     const batch: SimulationCommittedEvent[] = [];
     this.eventCapture = batch;
     try { this.session.advanceBy(deltaMs); }
+    finally { this.eventCapture = undefined; }
+    return batch;
+  }
+
+  advanceTo(wallNow = this.now()): SimulationCommittedEvent[] {
+    const batch: SimulationCommittedEvent[] = [];
+    this.eventCapture = batch;
+    try { this.session.advanceTo(wallNow); }
     finally { this.eventCapture = undefined; }
     return batch;
   }

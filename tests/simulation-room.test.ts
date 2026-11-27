@@ -110,3 +110,42 @@ test('checkpoints restore only committed tile positions and preserve clock and p
   assert.notDeepEqual(room.renderPositions().mara, { x: 2, y: 3 });
   room.dispose();
 });
+
+test('simulation room advanceTo drives absolute advance with event capture', () => {
+  let currentTime = 1_000;
+  const room = new SimulationRoom({ runId: 'advance-to-fixture', now: () => currentTime, routeStepMs: 100 });
+  assert.equal(room.checkpoint().activeTimeMs, 0);
+
+  currentTime = 1_050;
+  const events = room.advanceTo(currentTime);
+  assert.equal(events.length, 0);
+  assert.equal(room.checkpoint().activeTimeMs, 50);
+
+  // Dispatch mid-advance
+  currentTime = 1_100;
+  const waitOutcome = room.dispatch('mara', { type: 'wait' });
+  assert.equal(waitOutcome.status, 'committed');
+  assert.equal(room.checkpoint().activeTimeMs, 100);
+
+  // Absolute advanceTo continues from wall clock without double count
+  currentTime = 1_200;
+  room.advanceTo(currentTime);
+  assert.equal(room.checkpoint().activeTimeMs, 200);
+
+  // Relative advance still increments clock and pause/resume works
+  room.advance(50);
+  assert.equal(room.checkpoint().activeTimeMs, 250);
+
+  const paused = room.pause();
+  assert.equal(paused.activeTimeMs, 250);
+  currentTime = 5_000;
+  room.advanceTo(currentTime);
+  assert.equal(room.checkpoint().activeTimeMs, 250);
+
+  room.resume();
+  currentTime = 5_100;
+  room.advanceTo(currentTime);
+  assert.equal(room.checkpoint().activeTimeMs, 350);
+
+  room.dispose();
+});
