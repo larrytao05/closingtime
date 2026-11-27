@@ -93,6 +93,10 @@ export class SimulationRuntime {
   private paused = false;
   private resetting = false;
   private disposed = false;
+  private resetInstallation?: Promise<void>;
+  private disposal?: Promise<void>;
+  private playerCheckpointPending = false;
+  private savingPlayerCheckpoint = false;
   private lastAmbientAt = 0;
   private frameTimer?: ReturnType<typeof setTimeout>;
   private checkpointTimer?: ReturnType<typeof setTimeout>;
@@ -193,7 +197,9 @@ export class SimulationRuntime {
     this.paused = true;
     this.generation++;
     this.scheduler.pause('paused');
+    if (this.disposed) return;
     const checkpoint = this.room.pause();
+    if (this.disposed) return;
     this.stopLoops();
     await this.persist(checkpoint);
     this.publish();
@@ -229,29 +235,47 @@ export class SimulationRuntime {
     this.generation++;
     this.stopLoops();
     this.scheduler.pause('resetting');
+    if (this.disposed) return;
     this.room.pause();
-    const previous = this.room.checkpoint();
-    await this.persist(previous);
+    if (this.disposed) return;
+    await this.persist(this.room.checkpoint());
+    if (this.disposed) return;
     this.scheduler.dispose();
     this.unsubscribeRoom?.();
     this.room.dispose();
-    await this.startNewInternal(token());
+    this.resetInstallation = Promise.resolve().then(() => {
+      if (!this.disposed) return this.startNewInternal(token());
+    });
+    try { await this.resetInstallation; }
+    finally { this.resetInstallation = undefined; }
+    if (this.disposed) return;
     this.resetting = false;
     this.beginLoops();
     this.publish();
   }
 
-  async dispose(): Promise<void> {
-    if (this.disposed) return;
+  dispose(): Promise<void> {
+    if (this.disposal) return this.disposal;
+    let complete!: (result: Promise<void>) => void;
+    this.disposal = new Promise(resolve => { complete = resolve; });
     this.disposed = true;
     this.generation++;
+    complete(this.finishDisposal());
+    return this.disposal;
+  }
+
+  private async finishDisposal(): Promise<void> {
     this.stopLoops();
-    this.scheduler.dispose();
-    this.unsubscribeRoom?.();
-    this.room.dispose();
-    // Preserve the latest save; releasing a claim tombstones it by design.
     this.listeners.clear();
     this.frameListeners.clear();
+    if (this.resetInstallation) {
+      try { await this.resetInstallation; } catch { /* reset reports installation failure */ }
+    }
+    this.scheduler.dispose();
+    const saved = this.persist(this.room.checkpoint());
+    this.unsubscribeRoom?.();
+    this.room.dispose();
+    await saved;
   }
 
   private async startNewInternal(writerToken: string): Promise<void> {
@@ -289,6 +313,9 @@ export class SimulationRuntime {
     this.audit.recordEvent(event);
     for (const actor of event.audience) this.memory.ingest(event, actor);
     const p = event.payload;
+    if ((p.type === 'actor-joined' || p.type === 'speech' || p.type === 'room-interaction') && p.actorId === 'player') {
+      void this.checkpointPlayerActivity();
+    }
     const description = p.type === 'speech' ? `${p.actorId}: ${p.text}`
       : p.type === 'movement-tile-committed' ? `${p.actorId} moved.`
       : p.type === 'actor-joined' ? `${p.actorId} joined the room.`
@@ -315,7 +342,7 @@ export class SimulationRuntime {
       this.addActivity({ id: `decision:${request.requestId}`, activeTimeMs: entry.finishedAtActiveMs,
         actorId, kind: 'decision', text: entry.reason ?? entry.rationale ?? 'Decision finished.', outcome: entry.outcome });
       this.publish();
-      void this.persist(this.room.checkpoint());
+      if (!this.disposed) void this.persist(this.room.checkpoint());
     };
     const onAbort = () => {
       const abortReason: 'cancelled' | 'failed' = this.generation !== generation || this.paused || this.disposed ? 'cancelled' : 'failed';
@@ -402,17 +429,32 @@ export class SimulationRuntime {
     return true;
   }
 
+  private async checkpointPlayerActivity(): Promise<void> {
+    this.playerCheckpointPending = true;
+    if (this.savingPlayerCheckpoint) return;
+    this.savingPlayerCheckpoint = true;
+    try {
+      while (this.playerCheckpointPending && !this.paused && !this.disposed && !this.resetting) {
+        this.playerCheckpointPending = false;
+        await this.persist(this.room.checkpoint());
+      }
+    } finally {
+      this.playerCheckpointPending = false;
+      this.savingPlayerCheckpoint = false;
+    }
+  }
+
   private async persist(checkpoint: SimulationRoomCheckpoint): Promise<void> {
     const generation = this.generation;
     const claim = this.claim;
-    const audit = this.audit.snapshot(checkpoint);
-    const envelope: SimulationSaveEnvelope = { schemaVersion: 3, runId: audit.runId,
-      checkpoint: clone(checkpoint), memory: this.memory.snapshot(), audit,
-      nextEventSequence: audit.finalCheckpointProvenance.throughSequence + 1,
-      writerToken: claim.writerToken, writerGeneration: claim.generation };
     try {
+      const audit = this.audit.snapshot(checkpoint);
+      const envelope: SimulationSaveEnvelope = { schemaVersion: 3, runId: audit.runId,
+        checkpoint: clone(checkpoint), memory: this.memory.snapshot(), audit,
+        nextEventSequence: audit.finalCheckpointProvenance.throughSequence + 1,
+        writerToken: claim.writerToken, writerGeneration: claim.generation };
       const result = await this.store.save(claim, envelope);
-      if (generation !== this.generation || claim !== this.claim) return;
+      if (this.disposed || generation !== this.generation || claim !== this.claim) return;
       if (result.status === 'ownership-lost') {
         this.paused = true;
         this.scheduler.pause('save ownership lost');
@@ -422,7 +464,7 @@ export class SimulationRuntime {
         this.publish();
       }
     } catch (error) {
-      if (generation === this.generation && !this.disposed) console.error('Simulation checkpoint failed.', error);
+      if (generation === this.generation && claim === this.claim) console.error('Simulation checkpoint failed.', error);
     }
   }
 
@@ -436,6 +478,7 @@ export class SimulationRuntime {
     if (this.paused || this.disposed) return;
     const now = this.now();
     this.room.advanceTo(now);
+    if (this.paused || this.disposed) return;
     const activeTimeMs = this.room.checkpoint().activeTimeMs;
     if (activeTimeMs - this.lastAmbientAt >= this.ambientIntervalMs) {
       const actor = NPCS[Math.floor(Math.random() * NPCS.length)];
@@ -443,9 +486,10 @@ export class SimulationRuntime {
       this.lastAmbientAt = activeTimeMs;
     }
     this.publishFrame();
-    this.frameTimer = this.setTimer(() => this.frameLoop(), this.frameIntervalMs);
+    if (!this.paused && !this.disposed) this.frameTimer = this.setTimer(() => this.frameLoop(), this.frameIntervalMs);
   }
   private scheduleCheckpoint(): void {
+    if (this.paused || this.disposed) return;
     this.checkpointTimer = this.setTimer(() => {
       if (this.paused || this.disposed) return;
       void this.persist(this.room.checkpoint());

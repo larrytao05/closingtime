@@ -3,7 +3,7 @@ import { test } from 'node:test';
 import type { DurableState, SimulationSaveStorage } from '../src/simulation/save';
 import { SimulationSaveStore } from '../src/simulation/save';
 import { SimulationRuntime } from '../src/simulation/runtime';
-import type { SimulationDecisionRequest } from '../src/simulation/contracts';
+import type { SimulationDecisionRequest, SimulationSaveEnvelope } from '../src/simulation/contracts';
 
 class MemoryStorage implements SimulationSaveStorage {
   value: DurableState | null = null;
@@ -202,6 +202,109 @@ test('pause checkpoint resumes sourceable memory and a replayable audit', async 
   assert.ok(resumed.snapshot().memory.some(record => record.kind === 'attributed-speech' && record.owner === 'player' && record.exactLine === 'The mugs are staying on the counter.'));
   assert.deepEqual(resumed.replay(JSON.parse(resumed.exportAudit())), resumed.snapshot().checkpoint);
   await resumed.dispose();
+});
+
+test('disposal waits for the checkpoint that preserves committed state, memory, and audit', async () => {
+  let holdWrite = false;
+  let writeEntered = false;
+  let releaseWrite!: () => void;
+  const writeGate = new Promise<void>(resolve => { releaseWrite = resolve; });
+  class DelayedSaveStore extends SimulationSaveStore {
+    override async save(...args: Parameters<SimulationSaveStore['save']>) {
+      if (holdWrite) { writeEntered = true; await writeGate; }
+      return super.save(...args);
+    }
+  }
+  const store = new DelayedSaveStore(new MemoryStorage());
+  const fetcher: typeof fetch = async () => { throw new Error('No model decision expected.'); };
+  const options = { ...runtimeOptions(store, fetcher), now: () => 0 };
+  const runtime = await SimulationRuntime.start(options);
+  assert.equal(runtime.join().status, 'committed');
+  assert.equal(runtime.action('riley', { type: 'speak' }, 'Keep this line.').status, 'committed');
+  const before = runtime.snapshot();
+
+  holdWrite = true;
+  const disposal = runtime.dispose();
+  let disposed = false;
+  void disposal.then(() => { disposed = true; });
+  try {
+    assert.equal(runtime.dispose(), disposal);
+    await until(() => writeEntered);
+    assert.equal(disposed, false);
+    assert.equal(runtime.action('player', { type: 'wait' }).status, 'skipped');
+  } finally {
+    holdWrite = false;
+    releaseWrite();
+    await disposal;
+  }
+
+  const resumed = await SimulationRuntime.resume(options);
+  try {
+    const after = resumed.snapshot();
+    assert.equal(after.runId, before.runId);
+    assert.deepEqual(after.checkpoint, before.checkpoint);
+    assert.deepEqual(after.memory, before.memory);
+    assert.deepEqual(after.audit, before.audit);
+    assert.deepEqual(resumed.replay(after.audit), before.checkpoint);
+  } finally {
+    await resumed.dispose();
+  }
+});
+
+test('player activity saves the latest committed snapshot without queuing a write for every action', async () => {
+  let holdNextWrite = false;
+  let releaseWrite!: () => void;
+  let enterWrite!: () => void;
+  const writeGate = new Promise<void>(resolve => { releaseWrite = resolve; });
+  const writeEntered = new Promise<void>(resolve => { enterWrite = resolve; });
+  class DelayedStorage extends MemoryStorage {
+    override async readWrite<T>(update: (current: DurableState | null) => { next: DurableState | null; result: T }): Promise<T> {
+      if (holdNextWrite) {
+        holdNextWrite = false;
+        enterWrite();
+        await writeGate;
+      }
+      return super.readWrite(update);
+    }
+  }
+  const writes: SimulationSaveEnvelope[] = [];
+  class TrackedStore extends SimulationSaveStore {
+    override save(...args: Parameters<SimulationSaveStore['save']>) {
+      writes.push(args[1]);
+      return super.save(...args);
+    }
+  }
+  const store = new TrackedStore(new DelayedStorage());
+  const fetcher: typeof fetch = async () => { throw new Error('No model decision expected.'); };
+  const runtime = await SimulationRuntime.start({ ...runtimeOptions(store, fetcher), now: () => 0 });
+  try {
+    holdNextWrite = true;
+    assert.equal(runtime.join({ x: 5, y: 1 }).status, 'committed');
+    assert.equal(writes.length, 2);
+    await writeEntered;
+    assert.equal(runtime.action('player', { type: 'speak' }, 'First line.').status, 'committed');
+    assert.equal(runtime.action('player', { type: 'speak' }, 'Last line.').status, 'committed');
+    assert.equal(writes.length, 2);
+    releaseWrite();
+    await until(() => writes.length === 3);
+    const afterSpeech = await store.loadCurrent();
+    assert.ok(afterSpeech?.memory.some(record => record.kind === 'attributed-speech' && record.exactLine === 'Last line.'));
+
+    assert.equal(runtime.action('player', { type: 'close' }).status, 'committed');
+    await until(() => writes.length === 4);
+
+    const saved = await store.loadCurrent();
+    assert.ok(saved);
+    assert.equal(saved.checkpoint.windowOpen, false);
+    const live = runtime.snapshot();
+    assert.deepEqual(saved.checkpoint, live.checkpoint);
+    assert.deepEqual(saved.audit, live.audit);
+    assert.deepEqual(saved.memory, live.memory);
+    assert.deepEqual(runtime.replay(saved.audit), live.checkpoint);
+  } finally {
+    releaseWrite();
+    await runtime.dispose();
+  }
 });
 
 test('mid-frame dispatch advances simulation clock through a single clock source without double counting', async () => {
