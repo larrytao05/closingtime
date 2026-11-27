@@ -1,11 +1,11 @@
-import { actionsFor, createWorld, papersExposed, wetPapers, type Action, type ActorId, type World } from './world';
+import { actionsFor, createWorld, papersExposed, wetPapers, type Action, type WorldActorId, type ActorId, type World } from './world';
 
-export interface SessionSnapshot {
+export interface SessionSnapshot<A extends WorldActorId = ActorId> {
   readonly sessionId: string;
   readonly activeMs: number;
   readonly revision: number;
   readonly paused: boolean;
-  readonly world: World;
+  readonly world: World<A>;
 }
 
 export interface DispatchMetadata {
@@ -27,53 +27,54 @@ type ActionOutcome =
   | { status: 'completed'; reason?: never }
   | { status: 'skipped'; reason: string };
 
-type ActionPayload = {
+type ActionPayload<A extends WorldActorId = ActorId> = {
   kind: 'action';
-  actor: ActorId;
+  actor: A;
   action: Action;
-  before: SessionSnapshot;
-  after: SessionSnapshot;
+  before: SessionSnapshot<A>;
+  after: SessionSnapshot<A>;
   metadata: DispatchMetadata & { commandId: string };
 } & ActionOutcome;
 
-type RainPayload = {
+type RainPayload<A extends WorldActorId = ActorId> = {
   kind: 'rain';
   amount: number;
-  before: SessionSnapshot;
-  after: SessionSnapshot;
+  before: SessionSnapshot<A>;
+  after: SessionSnapshot<A>;
 };
 
-type LifecyclePayload = {
+type LifecyclePayload<A extends WorldActorId = ActorId> = {
   kind: 'session';
   phase: 'started' | 'paused' | 'resumed' | 'ended';
   reason?: 'restart' | 'dispose';
-  snapshot: SessionSnapshot;
+  snapshot: SessionSnapshot<A>;
 };
 
-export type CoreEvent = EventEnvelope & (ActionPayload | RainPayload | LifecyclePayload);
-export type ActionEvent = EventEnvelope & ActionPayload;
+export type CoreEvent<A extends WorldActorId = ActorId> = EventEnvelope & (ActionPayload<A> | RainPayload<A> | LifecyclePayload<A>);
+export type ActionEvent<A extends WorldActorId = ActorId> = EventEnvelope & ActionPayload<A>;
 
-export type RuntimePayload = {
+export type RuntimePayload<A extends WorldActorId = ActorId> = {
   kind: 'routeSubmitted' | 'routeStarted' | 'routeFinished' | 'decisionRequested' | 'decisionReceived'
     | 'decisionFailed' | 'decisionCanceled' | 'decisionSkipped' | 'decisionRetryScheduled';
-  actor?: ActorId;
+  actor?: A;
   outcome?: string;
   requestId?: string;
 };
-export type SessionEvent = CoreEvent | (EventEnvelope & RuntimePayload);
+export type SessionEvent<A extends WorldActorId = ActorId> = CoreEvent<A> | (EventEnvelope & RuntimePayload<A>);
 
-export type DispatchResult =
-  | { ok: true; world: World; event: ActionEvent }
-  | { ok: false; reason: string; event?: ActionEvent };
+export type DispatchResult<A extends WorldActorId = ActorId> =
+  | { ok: true; world: World<A>; event: ActionEvent<A> }
+  | { ok: false; reason: string; event?: ActionEvent<A> };
 
-type Listener = (event: SessionEvent) => void;
-type MotionGuard = (actor: ActorId, action: Action, metadata: DispatchMetadata) => string | undefined;
+type Listener<A extends WorldActorId = ActorId> = (event: SessionEvent<A>) => void;
+type MotionGuard<A extends WorldActorId = ActorId> = (actor: A, action: Action, metadata: DispatchMetadata) => string | undefined;
 
-interface SessionOptions {
+interface SessionOptions<A extends WorldActorId = ActorId> {
   now?: () => number;
   wetnessIntervalMs?: number;
   makeSessionId?: () => string;
-  onEvent?: Listener;
+  onEvent?: Listener<A>;
+  initialWorld?: World<A>;
 }
 
 interface ScheduledStep {
@@ -89,8 +90,8 @@ function freeze<T>(value: T): T {
   return value;
 }
 
-export class RealtimeSession {
-  private world = freeze(createWorld());
+export class RealtimeSession<A extends WorldActorId = ActorId> {
+  private world: World<A>;
   private sessionId: string;
   private activeMs = 0;
   private revision = 0;
@@ -109,17 +110,20 @@ export class RealtimeSession {
   private readonly now: () => number;
   private readonly makeSessionId: () => string;
   private readonly wetnessIntervalMs: number;
-  private readonly listeners = new Set<Listener>();
-  private readonly events: SessionEvent[] = [];
+  private readonly listeners = new Set<Listener<A>>();
+  private readonly events: SessionEvent<A>[] = [];
   private readonly lifecycleQueue: (() => void)[] = [];
   private readonly scheduled: ScheduledStep[] = [];
-  private motionGuard?: MotionGuard;
+  private motionGuard?: MotionGuard<A>;
+  private readonly makeInitialWorld: () => World<A>;
 
   constructor({ now = () => performance.now(), wetnessIntervalMs = 4000,
-    makeSessionId = () => crypto.randomUUID(), onEvent }: SessionOptions = {}) {
+    makeSessionId = () => crypto.randomUUID(), onEvent, initialWorld }: SessionOptions<A> = {}) {
     if (!Number.isFinite(wetnessIntervalMs) || wetnessIntervalMs <= 0) {
       throw new RangeError('Wetness interval must be positive and finite.');
     }
+    this.makeInitialWorld = () => initialWorld ? structuredClone(initialWorld) : createWorld() as World<A>;
+    this.world = freeze(this.makeInitialWorld());
     this.now = now;
     this.wetnessIntervalMs = wetnessIntervalMs;
     this.makeSessionId = makeSessionId;
@@ -129,7 +133,26 @@ export class RealtimeSession {
     this.lifecycle('started');
   }
 
-  snapshot(): SessionSnapshot {
+  restoreClock(activeMs: number, exposureMs: number, revision?: number): void {
+    if (![activeMs, exposureMs].every(Number.isFinite) || activeMs < 0 || exposureMs < 0 || exposureMs >= this.wetnessIntervalMs) throw new RangeError('Invalid restored clock.');
+    this.activeMs = activeMs;
+    this.exposure = exposureMs;
+    if (revision !== undefined) this.revision = revision;
+    this.wallMs = this.now();
+  }
+
+  advanceBy(deltaMs: number): void {
+    if (!Number.isFinite(deltaMs) || deltaMs < 0) throw new RangeError('Advance duration must be non-negative and finite.');
+    this.advanceTo(this.wallMs + deltaMs);
+  }
+
+  commitWorld(world: World<A>): void { this.commit(freeze(world)); }
+
+  rainExposureMs(): number { return this.exposure; }
+
+  actorIdsInWorld(): A[] { return Object.keys(this.world.actors).filter(id => (this.world.actors as Record<string, unknown>)[id] !== undefined) as A[]; }
+
+  snapshot(): SessionSnapshot<A> {
     return Object.freeze({
       sessionId: this.sessionId,
       activeMs: this.activeMs,
@@ -139,7 +162,7 @@ export class RealtimeSession {
     });
   }
 
-  subscribe(listener: Listener): () => void {
+  subscribe(listener: Listener<A>): () => void {
     this.listeners.add(listener);
     return () => { this.listeners.delete(listener); };
   }
@@ -158,11 +181,11 @@ export class RealtimeSession {
     return `${this.sessionId}:${prefix}:${++this.id}`;
   }
 
-  record<T extends RuntimePayload>(payload: T): EventEnvelope & T {
+  record<T extends RuntimePayload<A>>(payload: T): EventEnvelope & T {
     return this.emit(payload);
   }
 
-  setMotionGuard(guard: MotionGuard): () => void {
+  setMotionGuard(guard: MotionGuard<A>): () => void {
     this.motionGuard = guard;
     return () => { if (this.motionGuard === guard) this.motionGuard = undefined; };
   }
@@ -219,7 +242,7 @@ export class RealtimeSession {
     }
   }
 
-  dispatch(actor: ActorId, action: Action, wallNow = this.now(), input?: DispatchMetadata): DispatchResult {
+  dispatch(actor: A, action: Action, wallNow = this.now(), input?: DispatchMetadata): DispatchResult<A> {
     const sessionId = this.sessionId;
     this.advanceTo(wallNow);
     if (this.disposed || sessionId !== this.sessionId) return { ok: false, reason: 'This scene has ended.' };
@@ -276,7 +299,7 @@ export class RealtimeSession {
       this.scheduled.length = 0;
       this.lifecycle('ended', 'restart');
       this.scheduled.length = 0;
-      this.world = freeze(createWorld());
+      this.world = freeze(this.makeInitialWorld());
       this.sessionId = this.makeSessionId();
       this.activeMs = this.revision = this.sequence = this.id = this.exposure = 0;
     } finally {
@@ -309,17 +332,17 @@ export class RealtimeSession {
     if (Number.isFinite(wallNow) && wallNow > this.wallMs) this.wallMs = wallNow;
   }
 
-  private commit(world: World): void {
+  private commit(world: World<A>): void {
     if (world === this.world) return;
     this.world = freeze(world);
     this.revision++;
   }
 
-  private lifecycle(phase: LifecyclePayload['phase'], reason?: LifecyclePayload['reason']): void {
+  private lifecycle(phase: LifecyclePayload<A>['phase'], reason?: LifecyclePayload<A>['reason']): void {
     this.emit({ kind: 'session', phase, reason, snapshot: this.snapshot() });
   }
 
-  private emit<T extends ActionPayload | RainPayload | LifecyclePayload | RuntimePayload>(payload: T): EventEnvelope & T {
+  private emit<T extends ActionPayload<A> | RainPayload<A> | LifecyclePayload<A> | RuntimePayload<A>>(payload: T): EventEnvelope & T {
     const event: EventEnvelope & T = {
       ...payload,
       sessionId: this.sessionId,
@@ -329,7 +352,7 @@ export class RealtimeSession {
       sequence: ++this.sequence,
     };
     Object.freeze(event);
-    this.events.push(event);
+    this.events.push(event as SessionEvent<A>);
     this.publishEvents();
     return event;
   }

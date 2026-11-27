@@ -11,14 +11,48 @@
       <header class="page-header">
         <div>
           <h1>Closing Time</h1>
-          <p>Help Mara keep the café’s closing papers dry.</p>
+          <p id="page-tagline">Help Mara keep the café’s closing papers dry.</p>
         </div>
         <div class="scene-controls">
           <a id="mode-link" href="?mode=live">Play real-time</a>
+          <a id="simulation-entry" href="?mode=simulation">Watch simulation</a>
           <button id="reset" class="quiet" type="button">Restart scene</button>
         </div>
       </header>
-      <div class="game-layout">
+      <section id="simulation-app" hidden aria-label="Autonomous café simulation">
+        <div class="simulation-heading">
+          <div><h2>Autonomous café</h2><p>Watch the cast, or join them when you like.</p></div>
+          <span id="simulation-clock">0s</span>
+        </div>
+        <div id="simulation-start" class="simulation-start">
+          <button id="simulation-new" type="button">New simulation</button>
+          <button id="simulation-resume" class="quiet" type="button">Resume stored scene</button>
+          <label class="file-label">Import replay for inspection <input id="simulation-import-file" type="file" accept="application/json,.json"/></label>
+          <p id="simulation-start-feedback" class="feedback" role="status"></p>
+        </div>
+        <section id="simulation-replay-section" class="panel replay-panel" hidden><h3>Read-only replay</h3><pre id="simulation-replay"></pre></section>
+        <div id="simulation-controls" hidden>
+          <div class="game-layout">
+            <section class="room-panel" aria-label="Simulation café room">
+              <canvas id="simulation-canvas" width="768" height="576"></canvas>
+              <div class="room-footer"><p id="simulation-cast"></p><p>Observe freely · join to move and speak</p></div>
+            </section>
+            <aside class="sidebar" aria-label="Simulation controls">
+              <section class="panel"><h2>Shared state</h2><dl class="status"><dt>Window</dt><dd id="simulation-window"></dd><dt>Papers</dt><dd id="simulation-papers"></dd></dl></section>
+              <section class="panel"><h2>Your place in the café</h2><button id="simulation-join" type="button">Join on a free tile</button><div id="simulation-actions" class="action-list"></div>
+                <form id="simulation-speak"><label for="simulation-line">Say something</label><div class="input-row"><select id="simulation-recipient" aria-label="Address a character"></select><input id="simulation-line" maxlength="160" autocomplete="off" placeholder="I can help close up."/><button type="submit" class="quiet">Say</button></div></form>
+                <p id="simulation-feedback" class="feedback" role="status"></p>
+              </section>
+              <section class="panel"><h2>Scene</h2><p><button id="simulation-pause" class="quiet" type="button">Pause</button> <button id="simulation-new-scene" class="quiet" type="button">New simulation</button></p><button id="simulation-export" class="quiet" type="button">Export audit</button>
+                <details><summary>Character inspector</summary><label for="simulation-actor">Character</label><select id="simulation-actor"></select><pre id="simulation-inspector"></pre></details>
+                <details><summary>Recent audit</summary><pre id="simulation-audit"></pre></details>
+              </section>
+              <section class="panel"><h2>Recent activity</h2><ol id="simulation-activity" class="history"></ol></section>
+            </aside>
+          </div>
+        </div>
+      </section>
+      <div id="legacy-app" class="game-layout">
         <section class="room-panel" aria-label="Café room">
           <div id="room"></div>
           <div class="room-footer">

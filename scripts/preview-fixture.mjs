@@ -20,7 +20,7 @@ globalThis.fetch = async (input, { body, signal } = {}) => {
   const fixture = contexts.getStore();
   const { contents } = JSON.parse(body);
   const context = JSON.parse(contents[0].parts[0].text);
-  const choices = context.availableActions;
+  const choices = context.availableActions ?? context.options;
   const kind = fixture.scenario;
   const world = context.world;
   const sequence = (counts.get(fixture.key) || 0) + 1;
@@ -50,6 +50,22 @@ globalThis.fetch = async (input, { body, signal } = {}) => {
         signal.addEventListener('abort', abort, { once: true });
       }
     });
+  }
+
+  if (context.actorId) {
+    const addressed = choices.find(candidate => candidate.action?.type === 'speak' && candidate.action.recipient);
+    const ownLine = context.witnessedEvents?.map((event, index) => ({ event, index }))
+      .find(({ event }) => event.payload?.type === 'speech' && event.payload.actorId === context.actorId);
+    const simulationChoice = addressed ?? choices.find(candidate => candidate.action?.type === 'speak') ?? choices.find(candidate => candidate.action?.type === 'wait') ?? choices[0];
+    const reply = context.actorId === 'mara' && !ownLine ? 'I’ll check the window once we finish talking.'
+      : context.actorId === 'riley' ? 'I can keep an eye on it, Mara.' : 'That sounds good.';
+    const simulationOutput = {
+      actionId: simulationChoice.actionId,
+      reply: simulationChoice.action.type === 'speak' ? reply : null,
+      rationale: 'I am responding to what I can see and hear here.',
+      memoryProposals: ownLine && context.actorId === 'mara' ? [{ kind: 'open-commitment', sourceEventId: `evidence-${ownLine.index + 1}`, exactLine: ownLine.event.payload.text }] : [],
+    };
+    return Response.json({ modelVersion: 'browser-fixture', candidates: [{ content: { parts: [{ text: JSON.stringify(simulationOutput) }] } }] });
   }
 
   const toWindow = candidate => candidate.type === 'walkTo' && candidate.to.x === 4 && candidate.to.y === 0;
@@ -102,8 +118,8 @@ setInterval(refreshFixture, 300);
 </script>`;
 
 function readFixture(url) {
-  const requested = url.searchParams.get('fixture');
-  const scenario = ['fixed', 'delay', 'route', 'stale', 'failure', 'rate-limit', 'timeout'].includes(requested) ? requested : 'fixed';
+  const requested = url.searchParams.get('fixture') ?? (url.searchParams.get('mode') === 'simulation' ? 'simulation' : undefined);
+  const scenario = ['fixed', 'simulation', 'delay', 'route', 'stale', 'failure', 'rate-limit', 'timeout'].includes(requested) ? requested : 'fixed';
   const requestedRun = url.searchParams.get('run');
   const run = /^[a-z0-9_-]{1,40}$/i.test(requestedRun ?? '') ? requestedRun : 'default';
   return { scenario, key: scenario + ':' + run };
@@ -125,7 +141,7 @@ createServer(async (req, res) => {
             if (body.length > 2000000) return res.writeHead(413).end();
           }
           const { schemaVersion } = JSON.parse(body);
-          if (schemaVersion !== 1 && schemaVersion !== 2) return res.writeHead(400).end();
+          if (schemaVersion !== 1 && schemaVersion !== 2 && schemaVersion !== 3) return res.writeHead(400).end();
           recorded[schemaVersion] = body;
           exportsByRun.set(key, recorded);
         } else held.find(entry => entry.key === key)?.accept();

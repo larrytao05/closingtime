@@ -10,6 +10,7 @@
   --accent: #f3c987;
 }
 * { box-sizing: border-box; }
+[hidden] { display: none !important; }
 body { margin: 0; }
 .shell { width: min(1200px, 100%); margin: 0 auto; padding: 38px clamp(14px, 4vw, 44px); }
 .page-header { display: flex; justify-content: space-between; gap: 16px; align-items: center; margin-bottom: 26px; }
@@ -62,3 +63,20 @@ details { margin-top: 12px; font-size: 13px; }
 details summary { cursor: pointer; color: var(--accent); }
 #rationale, #trace-status, #timeline-status, #live-selected, #live-outcome { color: var(--muted); margin: 8px 0; overflow-wrap: anywhere; }
 #export-traces:disabled, #export-timeline:disabled { opacity: .55; cursor: default; }
+#simulation-entry { color: #b0ddd7; font-size: 13px; }
+#simulation-app { border-top: 1px solid var(--border); padding-top: 20px; }
+.simulation-heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 16px; }
+.simulation-heading h2 { margin: 0; font: 500 28px Georgia, serif; }
+.simulation-heading p { margin: 5px 0 0; color: var(--muted); font-size: 13px; }
+#simulation-clock { color: var(--accent); font-variant-numeric: tabular-nums; }
+.simulation-start { display: flex; flex-wrap: wrap; gap: 8px; }
+#simulation-canvas { display: block; width: 100%; aspect-ratio: 4 / 3; height: auto; background: #292e37; touch-action: manipulation; cursor: crosshair; }
+.file-label { display: block; margin-top: 10px; color: var(--muted); font-size: 12px; }
+.file-label input { margin-top: 5px; }
+#simulation-recipient { max-width: 116px; border: 1px solid #485057; border-radius: 7px; color: inherit; background: #1a1e22; font: inherit; font-size: 12px; }
+#simulation-actions { margin-top: 8px; }
+#simulation-activity { max-height: 250px; }
+#simulation-inspector, #simulation-audit, #simulation-replay { max-height: 260px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; color: var(--muted); font: 11px/1.4 ui-monospace, monospace; }
+#simulation-replay-section { margin-top: 12px; }
+.replay-panel { margin: 0 0 14px; }
+#simulation-replay-section h3 { font-size: 13px; }
