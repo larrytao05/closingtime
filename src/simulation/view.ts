@@ -17,6 +17,7 @@ export class SimulationView {
   private state?: RuntimeState;
   private actor: SimulationActorId = 'mara';
   private started = false;
+  private startup?: AbortController;
   private held = new Map<string, Point>();
   private canvas: HTMLCanvasElement;
   private context: CanvasRenderingContext2D;
@@ -30,6 +31,7 @@ export class SimulationView {
   }
 
   async start(resume: boolean) {
+    if (this.startup) return;
     if (this.started) {
       try {
         await this.runtime?.reset();
@@ -39,33 +41,45 @@ export class SimulationView {
       } catch (error) { this.message(`Could not start a new scene: ${this.errorMessage(error)}`); }
       return;
     }
+    const startup = new AbortController();
+    this.startup = startup;
+    const newButton = el<HTMLButtonElement>('simulation-new');
+    const resumeButton = el<HTMLButtonElement>('simulation-resume');
+    newButton.disabled = resumeButton.disabled = true;
+    let runtime: SimulationRuntime | undefined;
     try {
       const query = new URLSearchParams(location.search);
       const fixture = query.has('fixture');
-      this.runtime = resume ? await SimulationRuntime.resume(fixture ? { ambientIntervalMs: 4_000 } : {})
+      runtime = resume ? await SimulationRuntime.resume(fixture ? { ambientIntervalMs: 4_000 } : {})
         : await SimulationRuntime.start(fixture ? { ambientIntervalMs: 4_000 } : {});
-      this.runtime.subscribe(snapshot => { this.state = snapshot; this.render(); });
-      this.runtime.subscribeFrame(frame => { this.draw(frame.renderPositions); });
-      if (!resume) this.runtime.wake('mara', 'opening the café');
+      if (startup.signal.aborted) {
+        await runtime.dispose();
+        return;
+      }
+      this.runtime = runtime;
+      runtime.subscribe(snapshot => { this.state = snapshot; this.render(); });
+      runtime.subscribeFrame(frame => { this.draw(frame.renderPositions); });
       this.started = true;
       el('simulation-start').hidden = true;
       el('simulation-controls').hidden = false;
       this.render();
+      if (!resume) runtime.wake('mara', 'opening the café');
     } catch (error) {
       this.runtime = undefined;
+      this.state = undefined;
+      this.started = false;
+      el('simulation-start').hidden = false;
+      el('simulation-controls').hidden = true;
+      await runtime?.dispose();
       this.message(`Could not start the simulation: ${this.errorMessage(error)}`);
+    } finally {
+      this.startup = undefined;
+      newButton.disabled = resumeButton.disabled = false;
     }
   }
 
   private bind() {
-    el('simulation-new').addEventListener('click', async () => {
-      if (!this.runtime) { await this.start(false); return; }
-      try {
-        await this.runtime.reset();
-        el('simulation-replay-section').hidden = true;
-        this.message('A new café scene is running.');
-      } catch (error) { this.message(`Could not start a new scene: ${this.errorMessage(error)}`); }
-    });
+    el('simulation-new').addEventListener('click', () => void this.start(false));
     el('simulation-resume').addEventListener('click', () => void this.start(true));
     el('simulation-pause').addEventListener('click', () => {
       if (!this.runtime || !this.state) return;
@@ -118,7 +132,11 @@ export class SimulationView {
     });
     document.addEventListener('keyup', event => this.held.delete(event.key));
     window.addEventListener('blur', () => this.held.clear());
-    window.addEventListener('pagehide', () => { this.held.clear(); void this.runtime?.dispose(); });
+    window.addEventListener('pagehide', () => {
+      this.held.clear();
+      this.startup?.abort();
+      void this.runtime?.dispose();
+    });
   }
 
   private moveBy(delta: Point) {

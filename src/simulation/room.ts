@@ -15,6 +15,11 @@ const objectIds: readonly ObjectId[] = ['papers', 'mug1', 'mug2', 'towel'];
 const same = (a: Point, b: Point) => a.x === b.x && a.y === b.y;
 const distance = (a: Point, b: Point) => Math.abs(a.x - b.x) + Math.abs(a.y - b.y);
 const copyPoint = (point: Point): Point => ({ x: point.x, y: point.y });
+const preferredPlayerSpawn: Point = { x: 5, y: 3 };
+const playerSpawnCandidates = Array.from({ length: layout.width * layout.height }, (_, index) => ({
+  x: index % layout.width,
+  y: Math.floor(index / layout.width),
+})).sort((a, b) => distance(a, preferredPlayerSpawn) - distance(b, preferredPlayerSpawn) || a.y - b.y || a.x - b.x);
 
 export interface SimulationRoomOptions {
   runId?: string;
@@ -200,17 +205,17 @@ export class SimulationRoom {
     return event ? { status: 'committed', event } : { status: 'rejected', reason: 'Action did not produce a committed event.' };
   }
 
-  joinPlayer(position: Point = { x: 5, y: 3 }): SimulationDispatchOutcome {
+  joinPlayer(position?: Point): SimulationDispatchOutcome {
     if (this.paused) return { status: 'skipped', reason: 'paused' };
     const world = this.session.snapshot().world;
     if (world.actors.player) return { status: 'rejected', reason: 'The player has already joined.' };
-    if (!Number.isInteger(position.x) || !Number.isInteger(position.y) || !this.isFreeTile(position)) {
-      return { status: 'rejected', reason: 'Choose a free floor tile.' };
-    }
-    const next = { ...world, actors: { ...world.actors, player: { position: copyPoint(position) } } } as World<SimulationActorId>;
+    const candidates = position === undefined ? playerSpawnCandidates : [position];
+    const spawn = candidates.find(tile => this.isFreeTile(tile));
+    if (!spawn) return { status: 'rejected', reason: 'Choose a free floor tile.' };
+    const next = { ...world, actors: { ...world.actors, player: { position: copyPoint(spawn) } } } as World<SimulationActorId>;
     this.session.commitWorld(next);
     this.renderCache = undefined;
-    const event = this.commitEvent({ type: 'actor-joined', actorId: 'player', position: copyPoint(position) });
+    const event = this.commitEvent({ type: 'actor-joined', actorId: 'player', position: copyPoint(spawn) });
     return { status: 'committed', event };
   }
 
@@ -250,7 +255,8 @@ export class SimulationRoom {
 
   private isFreeTile(position: Point): boolean {
     const world = this.session.snapshot().world;
-    return position.x >= 0 && position.x < layout.width && position.y >= 0 && position.y < layout.height
+    return Number.isInteger(position.x) && Number.isInteger(position.y)
+      && position.x >= 0 && position.x < layout.width && position.y >= 0 && position.y < layout.height
       && this.session.actorIdsInWorld().every(actor => !same(world.actors[actor]!.position, position))
       && !same(layout.window, position)
       && !Object.values(layout.surfaces).some(surface => same(surface, position))

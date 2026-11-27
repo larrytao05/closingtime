@@ -39,6 +39,48 @@ test('simulation room shares tile reservations, commits routes, and joins the pl
   room.dispose();
 });
 
+test('implicit join uses the preferred tile when free and falls back when reserved or occupied', () => {
+  const preferred = { x: 5, y: 3 };
+  const initial = new SimulationRoom({ now: () => 0 });
+  assert.equal(initial.joinPlayer().status, 'committed');
+  assert.deepEqual(initial.checkpoint().actors.player, preferred);
+  initial.dispose();
+
+  for (const activeMs of [50, 100]) {
+    const room = new SimulationRoom({ now: () => 0, routeStepMs: 100 });
+    assert.equal(room.dispatch('jo', { type: 'walk', to: preferred }).status, 'route-accepted');
+    room.advance(activeMs);
+    assert.deepEqual(room.joinPlayer(preferred), { status: 'rejected', reason: 'Choose a free floor tile.' });
+    const fallback = { x: 5, y: 2 };
+    const joined = room.joinPlayer();
+    assert.equal(joined.status, 'committed');
+    assert.deepEqual(joined.event.payload, { type: 'actor-joined', actorId: 'player', position: fallback });
+    assert.deepEqual(joined.event.afterCheckpoint.actors.player, fallback);
+    assert.equal(joined.event.activeTimeMs, activeMs);
+    room.advance(100);
+    assert.deepEqual(room.checkpoint().actors.jo, preferred);
+    room.dispose();
+  }
+});
+
+test('join during movement publication uses the next step reservation', () => {
+  const room = new SimulationRoom({ now: () => 0, routeStepMs: 100, checkpoint: checkpoint({
+    mara: { x: 2, y: 3 }, riley: { x: 3, y: 4 }, jo: { x: 5, y: 4 },
+  }) });
+  const target = { x: 5, y: 2 };
+  const unsubscribe = room.subscribe(event => {
+    if (event.payload.type !== 'movement-tile-committed') return;
+    unsubscribe();
+    room.joinPlayer();
+  });
+  assert.equal(room.dispatch('jo', { type: 'walk', to: target }).status, 'route-accepted');
+  room.advance(100);
+  assert.deepEqual(room.checkpoint().actors.player, { x: 4, y: 3 });
+  room.advance(100);
+  assert.deepEqual(room.checkpoint().actors.jo, target);
+  room.dispose();
+});
+
 test('shared object ownership makes simultaneous pickup deterministic and stale actions fail', () => {
   const saved = checkpoint({ mara: { x: 5, y: 1 }, riley: { x: 6, y: 2 }, jo: { x: 4, y: 2 } });
   saved.objects.mug1 = { location: { heldBy: 'jo' }, wetness: 0 };
