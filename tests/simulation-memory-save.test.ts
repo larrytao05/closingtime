@@ -60,7 +60,7 @@ test('memory rejects incoming records when all 512 retained records are open com
   const ordinary = speech(513, 'riley', 'A later witnessed dialogue turn.', ['mara', 'riley']);
   memory.ingest(ordinary, 'mara');
   assert.equal(memory.snapshot().length, 512);
-  assert.equal(memory.snapshot().some(record => record.id === 'speech:cafe-1:513:riley'), false);
+  assert.equal(memory.snapshot().some(record => record.id === 'speech:cafe-1:513:riley:mara'), false);
   const proposedOpen = speech(514, 'mara', 'I promise I will bring the mug.', ['mara']);
   const witnessed = [{ runId: proposedOpen.runId, sequence: proposedOpen.sequence, activeTimeMs: proposedOpen.activeTimeMs, payload: proposedOpen.payload }];
   assert.deepEqual(memory.applyProposals('mara', [{ kind: 'open-commitment', sourceEventId: 'cafe-1:514', exactLine: proposedOpen.payload.text }], witnessed), []);
@@ -161,9 +161,149 @@ test('recall stays bounded after ingesting 1,000 seeded witnessed records', () =
 test('recall includes a Unicode record at its exact UTF-8 byte budget boundary', () => {
   const memory = new SimulationMemory();
   memory.ingest(speech(1, 'mara', 'Café ☕ — papers are ready.', ['mara']), 'mara');
-  const expected = { actorId: 'mara', records: memory.snapshot(), retrievedMemoryIds: ['speech:cafe-1:1:mara'] };
+  const expected = { actorId: 'mara', records: memory.snapshot(), retrievedMemoryIds: ['speech:cafe-1:1:mara:mara'] };
   const exactBytes = new TextEncoder().encode(JSON.stringify(expected)).byteLength;
 
   assert.equal(new TextEncoder().encode(JSON.stringify(memory.recall('mara', observation(), exactBytes))).byteLength, exactBytes);
   assert.deepEqual(memory.recall('mara', observation(), exactBytes - 1).records, []);
+});
+
+test('multiple witnesses receive distinct memory records with owner in speech and observation IDs', () => {
+  const memory = new SimulationMemory();
+  const dialogue = speech(1, 'riley', 'The rain stopped outside.', ['mara', 'riley', 'jo']);
+  const movement: SimulationCommittedEvent = {
+    runId: 'cafe-1', sequence: 2, activeTimeMs: 200, revision: 2,
+    audience: ['mara', 'riley', 'jo'],
+    payload: { type: 'movement-tile-committed', actorId: 'mara', from: { x: 2, y: 2 }, to: { x: 3, y: 2 } },
+    afterCheckpoint: checkpoint(2),
+    afterCheckpointProvenance: { runId: 'cafe-1', eventSequence: 2, revision: 2 },
+  };
+
+  // Ingest speech for all witnesses in audience
+  memory.ingest(dialogue, 'mara');
+  memory.ingest(dialogue, 'riley');
+  memory.ingest(dialogue, 'jo');
+
+  // Ingest observation for all witnesses in audience
+  memory.ingest(movement, 'mara');
+  memory.ingest(movement, 'riley');
+  memory.ingest(movement, 'jo');
+
+  const snapshot = memory.snapshot();
+  assert.equal(snapshot.length, 6);
+
+  // Check speech record IDs and ownership
+  const speechRecords = snapshot.filter(r => r.kind === 'attributed-speech');
+  assert.equal(speechRecords.length, 3);
+  assert.deepEqual(speechRecords.map(r => ({ id: r.id, owner: r.owner, speaker: r.speaker })), [
+    { id: 'speech:cafe-1:1:riley:mara', owner: 'mara', speaker: 'riley' },
+    { id: 'speech:cafe-1:1:riley:riley', owner: 'riley', speaker: 'riley' },
+    { id: 'speech:cafe-1:1:riley:jo', owner: 'jo', speaker: 'riley' },
+  ]);
+
+  // Check observation record IDs and ownership
+  const observationRecords = snapshot.filter(r => r.kind === 'observation');
+  assert.equal(observationRecords.length, 3);
+  assert.deepEqual(observationRecords.map(r => ({ id: r.id, owner: r.owner })), [
+    { id: 'observation:cafe-1:2:mara', owner: 'mara' },
+    { id: 'observation:cafe-1:2:riley', owner: 'riley' },
+    { id: 'observation:cafe-1:2:jo', owner: 'jo' },
+  ]);
+
+  // Each witness recalls only their own records
+  const maraRecall = memory.recall('mara', observation('mara'));
+  assert.equal(maraRecall.records.length, 2);
+  assert.ok(maraRecall.records.every(r => r.owner === 'mara'));
+  assert.deepEqual(maraRecall.retrievedMemoryIds, ['speech:cafe-1:1:riley:mara', 'observation:cafe-1:2:mara']);
+
+  const rileyRecall = memory.recall('riley', observation('riley'));
+  assert.equal(rileyRecall.records.length, 2);
+  assert.ok(rileyRecall.records.every(r => r.owner === 'riley'));
+  assert.deepEqual(rileyRecall.retrievedMemoryIds, ['speech:cafe-1:1:riley:riley', 'observation:cafe-1:2:riley']);
+
+  const joRecall = memory.recall('jo', observation('jo'));
+  assert.equal(joRecall.records.length, 2);
+  assert.ok(joRecall.records.every(r => r.owner === 'jo'));
+  assert.deepEqual(joRecall.retrievedMemoryIds, ['speech:cafe-1:1:riley:jo', 'observation:cafe-1:2:jo']);
+});
+
+test('per-witness deduplication rejects repeated ingest and preserves old saves with legacy IDs', async () => {
+  const memory = new SimulationMemory();
+  const dialogue = speech(1, 'riley', 'The rain stopped outside.', ['mara', 'riley']);
+
+  memory.ingest(dialogue, 'mara');
+  assert.equal(memory.snapshot().length, 1);
+
+  // Re-ingest the exact same event for the same witness: deduplicated
+  memory.ingest(dialogue, 'mara');
+  assert.equal(memory.snapshot().length, 1);
+
+  // Ingest for a different witness: accepted
+  memory.ingest(dialogue, 'riley');
+  assert.equal(memory.snapshot().length, 2);
+
+  // Re-ingest for second witness: deduplicated
+  memory.ingest(dialogue, 'riley');
+  assert.equal(memory.snapshot().length, 2);
+
+  // Preserves old saves with legacy IDs (without owner in ID)
+  const legacyRecords: SimulationMemoryRecord[] = [
+    { id: 'speech:legacy-1:1:riley', kind: 'attributed-speech', owner: 'mara', speaker: 'riley', sourceEventIds: ['legacy-1:1'], exactLine: 'Old dialogue line.', activeTimeMs: 100 },
+    { id: 'observation:legacy-1:2', kind: 'observation', owner: 'mara', sourceEventIds: ['legacy-1:2'], text: 'mara moved.', activeTimeMs: 200 },
+  ];
+
+  const restored = new SimulationMemory();
+  restored.restore(legacyRecords);
+  assert.deepEqual(restored.snapshot(), legacyRecords);
+
+  // Recalls legacy records properly by owner
+  const recalled = restored.recall('mara', observation('mara'));
+  assert.equal(recalled.records.length, 2);
+  assert.deepEqual(recalled.retrievedMemoryIds, ['speech:legacy-1:1:riley', 'observation:legacy-1:2']);
+
+  // Re-ingesting an event that matches an existing legacy record for that owner is deduplicated
+  const legacySpeechEvent = speech(1, 'riley', 'Old dialogue line.', ['mara', 'riley']);
+  (legacySpeechEvent as any).runId = 'legacy-1';
+  (legacySpeechEvent.afterCheckpointProvenance as any).runId = 'legacy-1';
+  restored.ingest(legacySpeechEvent, 'mara');
+  assert.equal(restored.snapshot().length, 2);
+
+  // Ingesting that same legacy event for a new witness (who wasn't in the legacy save) succeeds
+  restored.ingest(legacySpeechEvent, 'riley');
+  assert.equal(restored.snapshot().length, 3);
+  assert.equal(restored.snapshot()[2].id, 'speech:legacy-1:1:riley:riley');
+  assert.equal(restored.snapshot()[2].owner, 'riley');
+
+  // Durable store saves and loads legacy save envelope without issue
+  const storage = new MemoryStorage();
+  const store = new SimulationSaveStore(storage);
+  const claim = await store.claim('legacy-1', 'tab-1');
+  assert.equal(claim.status, 'claimed');
+  if (claim.status !== 'claimed') return;
+
+  const legacyEnvelope: SimulationSaveEnvelope = {
+    schemaVersion: 3,
+    runId: 'legacy-1',
+    checkpoint: checkpoint(2),
+    memory: legacyRecords,
+    audit: {
+      schemaVersion: 3,
+      runId: 'legacy-1',
+      startingCheckpoint: checkpoint(),
+      startingCheckpointProvenance: { runId: 'legacy-1', throughSequence: 0, revision: 1, source: 'run-start' },
+      firstRetainedSequence: 1,
+      entries: [],
+      prunedThroughSequence: 0,
+      finalCheckpoint: checkpoint(2),
+      finalCheckpointProvenance: { runId: 'legacy-1', throughSequence: 2, revision: 2 },
+    },
+    nextEventSequence: 3,
+    writerToken: 'tab-1',
+    writerGeneration: 1,
+  };
+
+  const saveResult = await store.save(claim.claim, legacyEnvelope);
+  assert.equal(saveResult.status, 'saved');
+  const loaded = await store.loadCurrent();
+  assert.deepEqual(loaded?.memory, legacyRecords);
 });

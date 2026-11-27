@@ -57,7 +57,7 @@ export class SimulationMemory {
     const p = event.payload;
     if (p.type === 'speech') {
       this.add({
-        id: `speech:${id}:${p.actorId}`,
+        id: `speech:${id}:${p.actorId}:${forActor}`,
         kind: 'attributed-speech', owner: forActor, speaker: p.actorId,
         sourceEventIds: [id], exactLine: p.text, activeTimeMs: event.activeTimeMs,
       });
@@ -65,7 +65,7 @@ export class SimulationMemory {
     }
     const text = describeEvent(event);
     if (text) this.add({
-      id: `observation:${id}`, kind: 'observation', owner: forActor,
+      id: `observation:${id}:${forActor}`, kind: 'observation', owner: forActor,
       sourceEventIds: [id], text, activeTimeMs: event.activeTimeMs,
     });
   }
@@ -168,7 +168,11 @@ export class SimulationMemory {
   }
 
   private add(record: SimulationMemoryRecord): boolean {
-    if (this.records.some(item => item.id === record.id)) return false;
+    if (this.records.some(item => item.id === record.id || (
+      item.owner === record.owner &&
+      item.kind === record.kind &&
+      item.sourceEventIds[0] === record.sourceEventIds[0]
+    ))) return false;
     if (this.records.length >= MAX_RECORDS) {
       // Open commitments survive ordinary churn. If the bound is entirely
       // occupied by open commitments, reject the incoming record explicitly.
