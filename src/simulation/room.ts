@@ -1,5 +1,5 @@
 import { MovementController } from '../movement';
-import { RealtimeSession, type SessionEvent } from '../realtime';
+import { RealtimeSession, type ActionEvent, type SessionEvent } from '../realtime';
 import {
   actionsFor, createWorld, layout, type Action, type ObjectId, type Point,
   type World,
@@ -53,6 +53,7 @@ export class SimulationRoom {
   private readonly movement: MovementController<SimulationActorId>;
   private readonly listeners = new Set<(event: SimulationCommittedEvent) => void>();
   private readonly witnessed = new Map<SimulationActorId, WitnessedObservationEvent[]>();
+  private readonly actionEvents = new WeakMap<ActionEvent<SimulationActorId>, SimulationCommittedEvent>();
   private eventCapture?: SimulationCommittedEvent[];
   private sequence: number;
   private paused = false;
@@ -135,9 +136,12 @@ export class SimulationRoom {
     if (!world.actors[actorId]) return [];
     const options: SimulationOption[] = [];
     const legal = actionsFor(world, actorId);
+    const moving = this.movement.isMoving(actorId);
     const push = (action: SimulationAction) => options.push({ actionId: JSON.stringify(action), action });
     for (const destination of this.movement.reachable(actorId)) push({ type: 'walk', to: destination });
-    for (const action of legal.interactions()) push(action);
+    for (const action of legal.interactions()) {
+      if (!moving || action.type === 'wait') push(action);
+    }
     push({ type: 'speak' });
     for (const { actorId: recipient } of this.observationFor(actorId).visibleActors) push({ type: 'speak', recipient });
     return options;
@@ -187,13 +191,12 @@ export class SimulationRoom {
       ? { type: 'speak', text: reply ?? '' }
       : action as Exclude<Action, { type: 'move' } | { type: 'speak' }>;
     this.directedRecipient = action.type === 'speak' ? action.recipient : undefined;
-    const batch: SimulationCommittedEvent[] = [];
-    this.eventCapture = batch;
+    this.eventCapture = undefined;
     let result: ReturnType<typeof this.session.dispatch>;
     try { result = this.session.dispatch(actorId, converted); }
     finally { this.directedRecipient = undefined; this.eventCapture = undefined; }
     if (!result.ok) return { status: 'rejected', reason: result.reason };
-    const event = batch[0];
+    const event = this.actionEvents.get(result.event);
     return event ? { status: 'committed', event } : { status: 'rejected', reason: 'Action did not produce a committed event.' };
   }
 
@@ -261,12 +264,12 @@ export class SimulationRoom {
         this.renderCache = undefined;
         this.commitEvent({ type: 'movement-tile-committed', actorId: actor,
           from: copyPoint(before.world.actors[actor]!.position), to: copyPoint(after.world.actors[actor]!.position) });
-      } else if (action.type === 'speak') {
-        const recipient = this.directedRecipient;
-        this.commitEvent({ type: 'speech', actorId: actor, recipient, text: action.text });
-      } else {
-        this.commitEvent({ type: 'room-interaction', actorId: actor, action: action as SimulationRoomEventPayload extends { type: 'room-interaction'; action: infer T } ? T : never });
+        return;
       }
+      const committed = action.type === 'speak'
+        ? this.commitEvent({ type: 'speech', actorId: actor, recipient: this.directedRecipient, text: action.text })
+        : this.commitEvent({ type: 'room-interaction', actorId: actor, action });
+      this.actionEvents.set(event, committed);
     } else if (event.kind === 'rain') {
         this.commitEvent({ type: 'rain', exposed: true, elapsedMs: 4_000, wetnessDelta: event.amount });
     }

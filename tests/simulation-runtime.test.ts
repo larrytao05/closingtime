@@ -3,6 +3,7 @@ import { test } from 'node:test';
 import type { DurableState, SimulationSaveStorage } from '../src/simulation/save';
 import { SimulationSaveStore } from '../src/simulation/save';
 import { SimulationRuntime } from '../src/simulation/runtime';
+import type { SimulationDecisionRequest } from '../src/simulation/contracts';
 
 class MemoryStorage implements SimulationSaveStorage {
   value: DurableState | null = null;
@@ -44,6 +45,46 @@ test('runtime sends same-origin actor-local requests and commits an NPC speech r
   assert.equal('wholeWorld' in calls[0].request, false);
   assert.ok(runtime.snapshot().audit.entries.some(entry => entry.kind === 'committed-event' && entry.event.payload.type === 'speech' && entry.event.payload.actorId === 'mara'));
   await runtime.dispose();
+});
+
+test('the decision audit links directed speech between rain and a subscriber joining the player', async () => {
+  let now = 0;
+  const store = new SimulationSaveStore(new MemoryStorage());
+  const fetcher: typeof fetch = async (_url, init) => {
+    const request: SimulationDecisionRequest = JSON.parse(String(init?.body));
+    const speak = request.actorId === 'mara';
+    const option = request.options.find(({ action }) => speak
+      ? action.type === 'speak' && action.recipient === 'riley'
+      : action.type === 'wait');
+    assert.ok(option);
+    if (speak) now = 4_001;
+    return Response.json({ runId: request.runId, requestId: request.requestId, generation: request.generation,
+      actorId: request.actorId, actionId: option.actionId, reply: speak ? 'Hello Riley.' : undefined, rationale: 'Fixture decision.' });
+  };
+  const runtime = await SimulationRuntime.start({ ...runtimeOptions(store, fetcher), now: () => now });
+  try {
+    let replayedJoin = false;
+    runtime.subscribe(snapshot => {
+      if (snapshot.checkpoint.actors.player || !snapshot.audit.entries.some(entry =>
+        entry.kind === 'committed-event' && entry.event.payload.type === 'speech')) return;
+      assert.equal(runtime.join().status, 'committed');
+      replayedJoin = Boolean(runtime.replay(JSON.parse(runtime.exportAudit())).actors.player);
+    });
+    runtime.wake('mara', 'fixture');
+    await until(() => runtime.snapshot().audit.entries.some(entry => entry.kind === 'decision' && entry.request.actorId === 'mara'));
+
+    const { audit, checkpoint } = runtime.snapshot();
+    const committed = audit.entries.flatMap(entry => entry.kind === 'committed-event' ? [entry.event] : []);
+    assert.deepEqual(committed.slice(0, 3).map(event => event.payload.type), ['rain', 'speech', 'actor-joined']);
+    assert.deepEqual(committed[1].payload, { type: 'speech', actorId: 'mara', recipient: 'riley', text: 'Hello Riley.' });
+    const decision = audit.entries.find(entry => entry.kind === 'decision' && entry.request.actorId === 'mara');
+    assert.ok(decision?.kind === 'decision');
+    assert.deepEqual(decision.dispatchOutcome, { status: 'committed', event: committed[1] });
+    assert.ok(replayedJoin);
+    assert.deepEqual(runtime.replay(JSON.parse(runtime.exportAudit())), checkpoint);
+  } finally {
+    await runtime.dispose();
+  }
 });
 
 test('held inference does not block player actions; pause terminalizes once and ignores a late response', async () => {

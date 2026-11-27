@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { SimulationRoom } from '../src/simulation/room';
-import type { SimulationRoomCheckpoint } from '../src/simulation/contracts';
+import type { SimulationCommittedEvent, SimulationRoomCheckpoint } from '../src/simulation/contracts';
 
 function checkpoint(actors: SimulationRoomCheckpoint['actors']): SimulationRoomCheckpoint {
   return {
@@ -54,6 +54,29 @@ test('shared object ownership makes simultaneous pickup deterministic and stale 
   room.dispose();
 });
 
+test('moving actors keep walk, wait, and speech options and regain interactions when they stop', () => {
+  const room = new SimulationRoom({ now: () => 0, routeStepMs: 100 });
+  const interaction = { type: 'putDown', objectId: 'mug1', surfaceId: 'counter' } as const;
+  const interactionId = JSON.stringify(interaction);
+  const maraOptions = () => room.optionsFor('mara');
+  assert.ok(maraOptions().some(option => option.actionId === interactionId));
+  assert.equal(room.dispatch('mara', { type: 'walk', to: { x: 1, y: 2 } }).status, 'route-accepted');
+
+  const movingOptions = maraOptions();
+  assert.deepEqual(new Set(movingOptions.map(option => option.action.type)), new Set(['walk', 'wait', 'speak']));
+  assert.equal(room.dispatch('mara', { type: 'wait' }).status, 'committed');
+  assert.equal(room.dispatch('mara', { type: 'speak', recipient: 'riley' }, 'On my way.').status, 'committed');
+  assert.deepEqual(room.dispatch('mara', interaction), {
+    status: 'rejected', reason: 'Finish the current step before interacting.',
+  });
+
+  room.advance(200);
+  assert.deepEqual(room.checkpoint().actors.mara, { x: 1, y: 2 });
+  assert.ok(maraOptions().some(option => option.actionId === interactionId));
+  assert.equal(room.dispatch('mara', interaction).status, 'committed');
+  room.dispose();
+});
+
 test('rain advances with the room clock without a pending request and commits its settled checkpoint', () => {
   const room = new SimulationRoom({ runId: 'rain-fixture', now: () => 0 });
   const events = room.advance(4_000);
@@ -62,6 +85,26 @@ test('rain advances with the room clock without a pending request and commits it
   assert.equal(events[0].afterCheckpoint.objects.papers.wetness, 1);
   assert.equal(events[0].afterCheckpoint.rainExposureMs, 0);
   assert.equal(events[0].afterCheckpointProvenance.eventSequence, events[0].sequence);
+  room.dispose();
+});
+
+test('dispatch returns its own committed event after due movement and rain', () => {
+  let now = 0;
+  const room = new SimulationRoom({ now: () => now, routeStepMs: 100 });
+  const events: SimulationCommittedEvent[] = [];
+  room.subscribe(event => events.push(event));
+  assert.equal(room.dispatch('mara', { type: 'walk', to: { x: 1, y: 3 } }).status, 'route-accepted');
+
+  now = 4_001;
+  const wait = room.dispatch('mara', { type: 'wait' });
+  assert.deepEqual(events.map(event => event.payload.type), ['movement-tile-committed', 'rain', 'room-interaction']);
+  assert.equal(wait.status, 'committed');
+  assert.equal(wait.event, events[2]);
+  assert.deepEqual(wait.event.payload, { type: 'room-interaction', actorId: 'mara', action: { type: 'wait' } });
+
+  now = 8_001;
+  assert.equal(room.dispatch('mara', { type: 'speak' }, '').status, 'rejected');
+  assert.deepEqual(events.map(event => event.payload.type), ['movement-tile-committed', 'rain', 'room-interaction', 'rain']);
   room.dispose();
 });
 
